@@ -41,11 +41,32 @@ interface PredictionStats {
   roi: number;
 }
 
+interface TopMatch {
+  id: string;
+  startTime: string;
+  homeTeam: {
+    abbr: string;
+    name: string;
+    isB2B: boolean;
+    pimPerGame: number;
+  };
+  awayTeam: {
+    abbr: string;
+    name: string;
+    isB2B: boolean;
+    pimPerGame: number;
+  };
+  advantageScore: number;
+  advantageTeam: 'home' | 'away';
+  reasons: string[];
+}
+
 interface GamesResponse {
   success: boolean;
   timestamp: string;
   timezone: string;
   games: Game[];
+  topMatches: TopMatch[];
   hotPlayers: HotPlayer[];
   stats: PredictionStats;
 }
@@ -123,6 +144,7 @@ export function useNHLData() {
   return {
     // Data
     games: gamesQuery.data?.games || [],
+    topMatches: gamesQuery.data?.topMatches || [],
     hotPlayers: gamesQuery.data?.hotPlayers || [],
     stats: gamesQuery.data?.stats || {
       totalPredictions: 0,

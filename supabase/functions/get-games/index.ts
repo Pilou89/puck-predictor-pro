@@ -159,7 +159,7 @@ serve(async (req) => {
 
     const oddsMap = new Map(currentOdds?.map(o => [o.selection.toLowerCase(), o.price]) || []);
 
-    // Format response
+    // Format response with advantage score calculation
     const games = upcomingGames.map(game => {
       const homeAbbr = game.homeTeam?.abbrev || '';
       const awayAbbr = game.awayTeam?.abbrev || '';
@@ -174,6 +174,43 @@ serve(async (req) => {
       if (awayMeta?.is_b2b) awayBadges.push('btb');
       if (homeMeta?.pim_per_game && homeMeta.pim_per_game > 8) homeBadges.push('discipline');
       if (awayMeta?.pim_per_game && awayMeta.pim_per_game > 8) awayBadges.push('discipline');
+
+      // Calculate advantage score for each team
+      // Higher score = more advantageous situation
+      let homeAdvantage = 0;
+      let awayAdvantage = 0;
+      const homeReasons: string[] = [];
+      const awayReasons: string[] = [];
+
+      // B2B: opponent fatigue is an advantage (+10 points)
+      if (awayMeta?.is_b2b) {
+        homeAdvantage += 10;
+        homeReasons.push('Adversaire en B2B 🔋');
+      }
+      if (homeMeta?.is_b2b) {
+        awayAdvantage += 10;
+        awayReasons.push('Adversaire en B2B 🔋');
+      }
+
+      // High PIM opponent: PP opportunities (+8 points if >8 PIM, +12 if >10)
+      if (awayMeta?.pim_per_game && awayMeta.pim_per_game > 8) {
+        const bonus = awayMeta.pim_per_game > 10 ? 12 : 8;
+        homeAdvantage += bonus;
+        homeReasons.push(`PIM adversaire: ${awayMeta.pim_per_game.toFixed(1)}/G 🔴`);
+      }
+      if (homeMeta?.pim_per_game && homeMeta.pim_per_game > 8) {
+        const bonus = homeMeta.pim_per_game > 10 ? 12 : 8;
+        awayAdvantage += bonus;
+        awayReasons.push(`PIM adversaire: ${homeMeta.pim_per_game.toFixed(1)}/G 🔴`);
+      }
+
+      // Home ice advantage (+3 points)
+      homeAdvantage += 3;
+
+      // Determine which team has the advantage
+      const advantageTeam = homeAdvantage >= awayAdvantage ? 'home' : 'away';
+      const advantageScore = Math.max(homeAdvantage, awayAdvantage);
+      const reasons = advantageTeam === 'home' ? homeReasons : awayReasons;
 
       return {
         id: game.id,
@@ -196,8 +233,18 @@ serve(async (req) => {
           home: homeBadges,
           away: awayBadges,
         },
+        // New fields for night analysis
+        advantageScore,
+        advantageTeam,
+        reasons,
       };
     });
+
+    // Sort games by advantage score and get top 3
+    const topMatches = [...games]
+      .filter(g => g.advantageScore >= 10) // Only matches with significant advantage
+      .sort((a, b) => b.advantageScore - a.advantageScore)
+      .slice(0, 3);
 
     // Add odds to hot players
     const hotPlayersWithOdds = hotPlayers.map(p => ({
@@ -233,6 +280,7 @@ serve(async (req) => {
         timestamp: now.toISOString(),
         timezone: 'Europe/Paris',
         games,
+        topMatches, // Top 3 matches for night analysis
         hotPlayers: hotPlayersWithOdds,
         stats: {
           totalPredictions,

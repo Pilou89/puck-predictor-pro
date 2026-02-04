@@ -5,6 +5,7 @@ import { StatsCard } from "@/components/dashboard/StatsCard";
 import { LearningPanel } from "@/components/dashboard/LearningPanel";
 import { HotPlayers } from "@/components/dashboard/HotPlayers";
 import { ValueAlerts } from "@/components/dashboard/ValueAlerts";
+import { NightAnalysis } from "@/components/dashboard/NightAnalysis";
 import { Match, BadgeType, PredictionStats } from "@/types/nhl";
 import { useNHLData } from "@/hooks/useNHLData";
 import { Users, Target, TrendingUp, Zap, Loader2 } from "lucide-react";
@@ -68,6 +69,7 @@ const Index = () => {
   const { toast } = useToast();
   const { 
     games, 
+    topMatches,
     hotPlayers, 
     stats, 
     lastSync, 
@@ -79,6 +81,7 @@ const Index = () => {
   const [localMatches, setLocalMatches] = useState<Match[]>([]);
   const [localBadges, setLocalBadges] = useState<Record<string, { home: BadgeType[]; away: BadgeType[] }>>({});
   const [valueAlerts, setValueAlerts] = useState<any[]>([]);
+  const [analyzedMatches, setAnalyzedMatches] = useState<any[]>([]);
 
   // Update local state when data changes
   useEffect(() => {
@@ -93,6 +96,22 @@ const Index = () => {
       setValueAlerts(generateValueAlerts(hotPlayers, games));
     }
   }, [hotPlayers, games]);
+
+  // Convert top matches for NightAnalysis component
+  useEffect(() => {
+    if (topMatches.length > 0) {
+      const converted = topMatches.map(m => ({
+        id: m.id?.toString() || Math.random().toString(),
+        homeTeam: m.homeTeam,
+        awayTeam: m.awayTeam,
+        startTime: new Date(m.startTime),
+        advantageScore: m.advantageScore,
+        advantageTeam: m.advantageTeam,
+        reasons: m.reasons,
+      }));
+      setAnalyzedMatches(converted);
+    }
+  }, [topMatches]);
 
   const handleRefresh = async () => {
     try {
@@ -136,6 +155,7 @@ const Index = () => {
   const displayHotPlayers = formattedHotPlayers.length > 0 ? formattedHotPlayers : mockHotPlayers;
   const displayStats = stats.totalPredictions > 0 ? predictionStats : mockPredictionStats;
   const displayAlerts = valueAlerts.length > 0 ? valueAlerts : mockValueAlerts;
+  const displayAnalyzedMatches = analyzedMatches.length > 0 ? analyzedMatches : mockAnalyzedMatches;
 
   return (
     <div className="min-h-screen bg-background">
@@ -191,7 +211,10 @@ const Index = () => {
             {/* Main Grid */}
             <div className="grid lg:grid-cols-3 gap-6">
               {/* Left Column - Matches */}
-              <div className="lg:col-span-2 space-y-6">
+            <div className="lg:col-span-2 space-y-6">
+                {/* Night Analysis - Top 3 matches */}
+                <NightAnalysis matches={displayAnalyzedMatches} />
+                
                 <UpcomingMatches matches={displayMatches} matchBadges={displayBadges} />
                 
                 {/* Value Alerts */}
@@ -307,6 +330,36 @@ const mockHotPlayers = [
   { name: "Auston Matthews", team: "TOR", goalsLast5: 5, pointsLast5: 7, ppGoals: 1, currentOdds: 1.95, duoPartner: "Marner" },
   { name: "Nathan MacKinnon", team: "COL", goalsLast5: 3, pointsLast5: 10, ppGoals: 1, currentOdds: 2.25 },
   { name: "Nikita Kucherov", team: "TBL", goalsLast5: 2, pointsLast5: 8, ppGoals: 0, currentOdds: 2.50 },
+];
+
+const mockAnalyzedMatches = [
+  {
+    id: "analysis-1",
+    homeTeam: { abbr: "TOR", name: "Maple Leafs", isB2B: false, pimPerGame: 7.2 },
+    awayTeam: { abbr: "MTL", name: "Canadiens", isB2B: true, pimPerGame: 9.4 },
+    startTime: new Date(Date.now() + 2 * 60 * 60 * 1000),
+    advantageScore: 22,
+    advantageTeam: 'home' as const,
+    reasons: ["Adversaire en B2B 🔋", "PIM adversaire: 9.4/G 🔴"],
+  },
+  {
+    id: "analysis-2",
+    homeTeam: { abbr: "EDM", name: "Oilers", isB2B: false, pimPerGame: 6.5 },
+    awayTeam: { abbr: "LAK", name: "Kings", isB2B: false, pimPerGame: 13.4 },
+    startTime: new Date(Date.now() + 5 * 60 * 60 * 1000),
+    advantageScore: 15,
+    advantageTeam: 'home' as const,
+    reasons: ["PIM adversaire: 13.4/G 🔴"],
+  },
+  {
+    id: "analysis-3",
+    homeTeam: { abbr: "NYR", name: "Rangers", isB2B: false, pimPerGame: 6.2 },
+    awayTeam: { abbr: "BOS", name: "Bruins", isB2B: true, pimPerGame: 13.2 },
+    startTime: new Date(Date.now() + 4 * 60 * 60 * 1000),
+    advantageScore: 25,
+    advantageTeam: 'home' as const,
+    reasons: ["Adversaire en B2B 🔋", "PIM adversaire: 13.2/G 🔴"],
+  },
 ];
 
 const mockValueAlerts = [
