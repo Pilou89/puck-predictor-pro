@@ -10,6 +10,7 @@ import { SystemStatus } from "@/components/dashboard/SystemStatus";
 import { TeamPillarPanel } from "@/components/dashboard/TeamPillarPanel";
 import { PlayerPillarPanel } from "@/components/dashboard/PlayerPillarPanel";
 import { StrategicBasketPanel } from "@/components/dashboard/StrategicBasketPanel";
+import { SystemBetBuilder } from "@/components/dashboard/SystemBetBuilder";
 import { BankrollPanel } from "@/components/dashboard/BankrollPanel";
 import { Match, BadgeType, PredictionStats } from "@/types/nhl";
 import { useNHLData } from "@/hooks/useNHLData";
@@ -274,6 +275,11 @@ const Index = () => {
                   setSelectedPlayerBets(new Map());
                 }}
               />
+            </div>
+
+            {/* System Bet Builder */}
+            <div className="mb-6">
+              <SystemBetBuilder />
             </div>
 
             {/* Bankroll & Learning - Side by Side */}
