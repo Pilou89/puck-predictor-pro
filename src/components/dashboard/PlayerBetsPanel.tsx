@@ -5,20 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { supabase } from "@/integrations/supabase/client";
-import {
-  User,
-  Shield,
-  Zap,
-  RefreshCw,
-  AlertCircle,
-  Sparkles,
-  Target,
-  DollarSign,
-  Brain,
-  Trophy,
-  Calculator,
-  Flame,
-} from "lucide-react";
+import { Brain, RefreshCw, Trophy, Flame, Zap, Shield, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { useBankroll } from "@/hooks/useBankroll";
 
@@ -29,70 +16,62 @@ interface PlayerSuggestion {
   match: string;
   matchTime: string;
   goalsLast14: number;
-  ppGoals: number;
   confidence: number;
   reasoning: string;
-  category: "SAFE" | "FUN" | "SUPER_COMBO" | "MEGA_FUN";
-  learningBoost: number;
+  category: "SAFE" | "FUN" | "MEGA_FUN";
+  suggestedType: "Buteur" | "Point";
 }
 
 export function PlayerBetsPanel() {
-  const { addBet, isUpdating } = useBankroll();
+  const { addBet } = useBankroll();
   const [players, setPlayers] = useState<PlayerSuggestion[]>([]);
-  const [oddsInputs, setOddsInputs] = useState<Record<string, { odds: string; betType: "Buteur" | "Point" }>>({});
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [stakePerCombo, setStakePerCombo] = useState(0.25);
-  const [isPlacing, setIsPlacing] = useState<string | null>(null);
   const [megaOdds, setMegaOdds] = useState<string>("");
+  const [isPlacing, setIsPlacing] = useState(false);
 
   const fetchPlayerSuggestions = async () => {
     setIsLoading(true);
-    setError(null);
     try {
       const { data: metrics } = await supabase.from("learning_metrics").select("*").eq("metric_type", "player");
       const boosts = new Map<string, number>();
       metrics?.forEach((m) => boosts.set(m.metric_key.toLowerCase(), m.confidence_adjustment || 0));
 
+      const today = new Date().toISOString().split("T")[0];
+      const { data: tonightOdds } = await supabase
+        .from("winamax_odds")
+        .select("*")
+        .gte("commence_time", `${today}T00:00:00Z`)
+        .lte("commence_time", `${today}T23:59:59Z`);
+
+      const tonightTeams = new Map<string, { match: string; time: string }>();
+      tonightOdds?.forEach((o) => {
+        const teams = extractTeamsFromMatch(o.match_name);
+        teams.forEach((t) => tonightTeams.set(t, { match: o.match_name, time: o.commence_time }));
+      });
+
       const fourteenDaysAgo = new Date();
       fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
-
       const { data: recentGoals } = await supabase
         .from("player_stats")
         .select("*")
         .gte("game_date", fourteenDaysAgo.toISOString().split("T")[0]);
 
-      const { data: tonightOdds } = await supabase
-        .from("winamax_odds")
-        .select("*")
-        .eq("market_type", "h2h")
-        .gte("commence_time", new Date().toISOString());
-
-      const tonightTeams = new Set<string>();
-      const tonightMatches: Record<string, { match: string; time: string }> = {};
-
-      tonightOdds?.forEach((o) => {
-        const teams = extractTeamsFromMatch(o.match_name);
-        teams.forEach((t) => {
-          tonightTeams.add(t);
-          tonightMatches[t] = { match: o.match_name, time: o.commence_time };
-        });
-      });
-
+      // Construction SANS DOUBLONS de joueurs
       const playerStatsMap = new Map<string, { goals: number; team: string }>();
       recentGoals?.forEach((g) => {
-        const key = g.scorer;
-        const existing = playerStatsMap.get(key) || { goals: 0, team: g.team_abbr };
-        existing.goals++;
-        playerStatsMap.set(key, existing);
+        const teamName = getFullTeamName(g.team_abbr);
+        if (tonightTeams.has(teamName)) {
+          const existing = playerStatsMap.get(g.scorer) || { goals: 0, team: teamName };
+          existing.goals++;
+          playerStatsMap.set(g.scorer, existing);
+        }
       });
 
       const suggestions: PlayerSuggestion[] = [];
       playerStatsMap.forEach((stats, playerName) => {
-        if (!tonightTeams.has(stats.team)) return;
-        const matchInfo = tonightMatches[stats.team];
+        const matchInfo = tonightTeams.get(stats.team)!;
         const playerBoost = boosts.get(playerName.toLowerCase()) || 0;
-        let confidence = 50 + playerBoost + stats.goals * 5;
+        let confidence = 55 + playerBoost + stats.goals * 4;
 
         suggestions.push({
           id: `player-${playerName.replace(/\s+/g, "-").toLowerCase()}`,
@@ -101,24 +80,23 @@ export function PlayerBetsPanel() {
           match: matchInfo.match,
           matchTime: matchInfo.time,
           goalsLast14: stats.goals,
-          ppGoals: 0,
-          confidence: Math.min(confidence, 95),
-          reasoning: stats.goals > 2 ? `🔥 En feu (${stats.goals} buts)` : "Régulier",
+          confidence: Math.min(confidence, 98),
+          reasoning: stats.goals >= 3 ? "🔥 Elite Finisher" : "Régulier",
           category: "SAFE",
-          learningBoost: playerBoost,
+          suggestedType: stats.goals >= 2 ? "Buteur" : "Point",
         });
       });
 
-      suggestions.sort((a, b) => b.confidence - a.confidence);
-      suggestions.forEach((p, idx) => {
-        if (idx < 3) p.category = "SAFE";
-        else if (idx < 6) p.category = "FUN";
-        else p.category = "SUPER_COMBO";
+      const sorted = suggestions.sort((a, b) => b.confidence - a.confidence);
+      sorted.forEach((p, i) => {
+        if (i < 3) p.category = "SAFE";
+        else if (i < 8) p.category = "FUN";
+        else p.category = "MEGA_FUN";
       });
 
-      setPlayers(suggestions.slice(0, 15));
+      setPlayers(sorted);
     } catch (err) {
-      setError("Erreur lors de l'analyse IA");
+      toast.error("Erreur lors de l'analyse");
     } finally {
       setIsLoading(false);
     }
@@ -128,172 +106,169 @@ export function PlayerBetsPanel() {
     fetchPlayerSuggestions();
   }, []);
 
-  // AGENT IA : Sélection automatique pour le MEGA FUN
-  const megaFunIA = useMemo(() => {
-    return players
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, 6)
-      .map((p) => ({
-        ...p,
-        suggestedType: p.goalsLast14 >= 2 ? "Buteur" : "Point",
-      }));
+  // LOGIQUE AGENT IA : Sélection de 4 matchs différents, max 2 joueurs par match
+  const megaFunSelection = useMemo(() => {
+    const selected: PlayerSuggestion[] = [];
+    const matchCounts = new Map<string, number>();
+    const uniqueMatches = new Set<string>();
+
+    for (const p of players) {
+      const count = matchCounts.get(p.match) || 0;
+
+      // On prend si : on n'a pas encore 4 matchs OU si on a déjà le match mais moins de 2 joueurs
+      if (uniqueMatches.size < 4 || uniqueMatches.has(p.match)) {
+        if (count < 2) {
+          // Max 2 joueurs par match pour varier
+          selected.push(p);
+          matchCounts.set(p.match, count + 1);
+          uniqueMatches.add(p.match);
+        }
+      }
+
+      // On s'arrête quand on a un bon combo (ex: 6 joueurs sur au moins 4 matchs)
+      if (selected.length >= 6 && uniqueMatches.size >= 4) break;
+    }
+    return selected;
   }, [players]);
 
   const handlePlaceMegaFun = async () => {
-    if (!megaOdds || parseFloat(megaOdds) <= 1) {
-      toast.error("Saisissez la cote totale du bookmaker");
-      return;
-    }
-    setIsPlacing("mega");
+    if (!megaOdds) return toast.error("Entrez la cote finale");
+    setIsPlacing(true);
     try {
       addBet({
         bet_date: new Date().toISOString().split("T")[0],
-        match_name: "COMBO MULTI-MATCHS IA",
-        bet_type: "MEGA_FUN_COMBO",
-        selection: megaFunIA.map((p) => `${p.name} (${p.suggestedType})`).join(" + "),
+        match_name: "MEGA FUN (4+ MATCHS)",
+        bet_type: "MEGA_FUN",
+        selection: megaFunSelection.map((p) => `${p.name} (${p.suggestedType})`).join(" + "),
         odds: parseFloat(megaOdds),
         stake: 10,
         potential_gain: parseFloat(megaOdds) * 10,
         outcome: "pending",
         actual_gain: 0,
         source: "ai_mega_fun",
-        notes: `Ticket généré par l'Agent IA • 6 joueurs sélectionnés`,
       });
-      toast.success("Ticket Mega Fun enregistré ! 🚀");
-    } catch (err) {
-      toast.error("Erreur bankroll");
+      toast.success("Combo 4 matchs enregistré !");
     } finally {
-      setIsPlacing(null);
+      setIsPlacing(false);
     }
   };
 
-  const renderPlayerCard = (p: PlayerSuggestion, color: string) => (
-    <div key={p.id} className={`p-3 rounded-lg border ${color} bg-card/50 flex justify-between items-center`}>
-      <div>
-        <p className="font-bold text-sm">
-          {p.name}{" "}
-          <Badge variant="outline" className="text-[10px] ml-1">
-            {p.team}
-          </Badge>
-        </p>
-        <p className="text-[10px] text-muted-foreground">{p.match}</p>
-      </div>
-      <div className="text-right">
-        <p className="text-xs font-bold text-primary">{p.confidence}%</p>
-        <p className="text-[9px] text-muted-foreground italic">{p.reasoning}</p>
-      </div>
-    </div>
-  );
-
   return (
-    <Card className="glass-card p-6">
+    <Card className="glass-card p-6 border-primary/20">
       <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-primary/20">
-            <Brain className="w-6 h-6 text-primary" />
-          </div>
-          <div>
-            <h3 className="font-semibold uppercase tracking-wider text-sm">Analyses Joueurs IA</h3>
-            <p className="text-[10px] text-muted-foreground">L'agent IA prépare vos combinés...</p>
-          </div>
+        <div className="flex items-center gap-2">
+          <Brain className="w-5 h-5 text-primary" />
+          <h3 className="font-bold uppercase text-sm tracking-tighter">Agent IA : Scouting Joueurs</h3>
         </div>
-        <Button onClick={fetchPlayerSuggestions} disabled={isLoading} size="sm" variant="ghost">
+        <Button onClick={fetchPlayerSuggestions} size="sm" variant="ghost" disabled={isLoading}>
           <RefreshCw className={isLoading ? "animate-spin" : ""} />
         </Button>
       </div>
 
       {isLoading ? (
-        <Skeleton className="h-40 w-full" />
+        <Skeleton className="h-64 w-full" />
       ) : (
         <div className="space-y-6">
+          {/* Grille Classique */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
-              <p className="text-[10px] font-bold text-success flex items-center gap-1 uppercase">
-                <Shield className="w-3 h-3" /> Top Safe
+              <p className="text-[10px] font-bold text-green-500 uppercase flex items-center gap-1">
+                <Shield className="w-3 h-3" /> Top Sûrs
               </p>
               {players
                 .filter((p) => p.category === "SAFE")
                 .slice(0, 3)
-                .map((p) => renderPlayerCard(p, "border-success/20"))}
+                .map((p) => (
+                  <div
+                    key={p.id}
+                    className="p-2 rounded border border-green-500/10 bg-green-500/5 flex justify-between items-center"
+                  >
+                    <span className="text-xs font-bold">
+                      {p.name} <span className="text-[9px] opacity-50 block">{p.team}</span>
+                    </span>
+                    <Badge className="bg-green-500/20 text-green-500 text-[9px]">{p.confidence}%</Badge>
+                  </div>
+                ))}
             </div>
             <div className="space-y-2">
-              <p className="text-[10px] font-bold text-warning flex items-center gap-1 uppercase">
-                <Zap className="w-3 h-3" /> Top Fun
+              <p className="text-[10px] font-bold text-orange-500 uppercase flex items-center gap-1">
+                <Zap className="w-3 h-3" /> Fun / Décisifs
               </p>
               {players
                 .filter((p) => p.category === "FUN")
                 .slice(0, 3)
-                .map((p) => renderPlayerCard(p, "border-warning/20"))}
+                .map((p) => (
+                  <div
+                    key={p.id}
+                    className="p-2 rounded border border-orange-500/10 bg-orange-500/5 flex justify-between items-center"
+                  >
+                    <span className="text-xs font-bold">
+                      {p.name} <span className="text-[9px] opacity-50 block">{p.team}</span>
+                    </span>
+                    <Badge className="bg-orange-500/20 text-orange-500 text-[9px]">{p.confidence}%</Badge>
+                  </div>
+                ))}
             </div>
           </div>
 
-          {/* SECTION MEGA FUN AUTOMATISÉE */}
-          <div className="border-t border-purple-500/20 pt-6">
-            <div className="flex items-center gap-2 mb-4">
-              <Flame className="w-5 h-5 text-purple-500 animate-pulse" />
-              <span className="text-sm font-black bg-gradient-to-r from-purple-400 to-pink-500 bg-clip-text text-transparent uppercase italic">
-                Vibration Mega Fun de l'Agent IA
-              </span>
+          {/* VIBRATION MEGA FUN - VARIÉ SUR 4 MATCHS */}
+          <div className="pt-4 border-t border-purple-500/20">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Flame className="w-5 h-5 text-purple-500 animate-pulse" />
+                <span className="text-xs font-black text-purple-400 uppercase italic">
+                  Vibration Mega Fun (4 Matchs)
+                </span>
+              </div>
+              <Badge variant="outline" className="text-[9px] border-purple-500/50 text-purple-300 italic">
+                {new Set(megaFunSelection.map((p) => p.match)).size} matchs couverts
+              </Badge>
             </div>
 
-            <div className="p-4 rounded-xl border-2 border-purple-500/40 bg-gradient-to-br from-purple-950/30 to-black text-white relative overflow-hidden group">
-              <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-20 transition-opacity">
-                <Sparkles className="w-16 h-16 text-purple-500" />
-              </div>
-
-              <div className="grid grid-cols-1 gap-2 mb-5">
-                {megaFunIA.map((p, i) => (
+            <div className="bg-gradient-to-br from-purple-950/40 to-black border-2 border-purple-500/30 rounded-xl p-4">
+              <div className="space-y-2 mb-4">
+                {megaFunSelection.map((p, i) => (
                   <div
                     key={i}
-                    className="flex justify-between items-center text-[11px] bg-white/5 p-2 rounded border border-white/5 hover:bg-white/10 transition-colors"
+                    className="flex justify-between items-center bg-white/5 p-2 rounded border border-white/5"
                   >
-                    <div className="flex items-center gap-3">
-                      <span className="text-purple-500 font-black font-mono">#{i + 1}</span>
-                      <span className="font-medium">
-                        {p.name} <span className="text-gray-500 text-[9px]">({p.team})</span>
+                    <div className="flex flex-col">
+                      <span className="text-[11px] font-bold">{p.name}</span>
+                      <span className="text-[8px] text-gray-500 uppercase">
+                        {p.match.split(" vs ")[0]} @ {p.match.split(" vs ")[1]}
                       </span>
                     </div>
-                    <Badge className="bg-purple-900/50 text-purple-300 border-purple-500/30 text-[9px] h-5">
+                    <Badge variant="outline" className="text-[9px] border-purple-500/50 text-purple-300">
                       {p.suggestedType}
                     </Badge>
                   </div>
                 ))}
               </div>
 
-              <div className="bg-black/40 p-4 rounded-lg border border-purple-500/20">
-                <p className="text-[10px] text-center text-purple-300 uppercase mb-3 font-bold tracking-widest">
-                  Cote totale du bookmaker
-                </p>
-                <div className="flex gap-3">
-                  <div className="relative flex-1">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-purple-500 font-bold">@</span>
-                    <Input
-                      type="number"
-                      placeholder="Ex: 11000"
-                      value={megaOdds}
-                      onChange={(e) => setMegaOdds(e.target.value)}
-                      className="pl-8 bg-black/60 border-purple-500/40 text-purple-300 font-black text-lg h-12"
-                    />
-                  </div>
-                  <Button
-                    onClick={handlePlaceMegaFun}
-                    disabled={isPlacing === "mega" || !megaOdds}
-                    className="h-12 px-6 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold shadow-lg shadow-purple-900/20"
-                  >
-                    {isPlacing === "mega" ? (
-                      <RefreshCw className="animate-spin" />
-                    ) : (
-                      <Trophy className="w-5 h-5 mr-2" />
-                    )}
-                    PLACER
-                  </Button>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-purple-500 font-bold">@</span>
+                  <Input
+                    placeholder="Cote Finale"
+                    type="number"
+                    value={megaOdds}
+                    onChange={(e) => setMegaOdds(e.target.value)}
+                    className="pl-8 bg-black/60 border-purple-500/40 text-purple-400 font-bold"
+                  />
                 </div>
-                {megaOdds && (
-                  <p className="text-center text-[10px] text-green-400 mt-3 font-mono animate-pulse">
-                    Gain potentiel pour 10€ : {(parseFloat(megaOdds) * 10).toLocaleString()}€
-                  </p>
-                )}
+                <Button
+                  onClick={handlePlaceMegaFun}
+                  disabled={isPlacing || !megaOdds}
+                  className="bg-purple-600 hover:bg-purple-500 px-6"
+                >
+                  {isPlacing ? <RefreshCw className="animate-spin w-4 h-4" /> : <Trophy className="w-4 h-4" />}
+                </Button>
               </div>
+              {megaOdds && (
+                <p className="text-[10px] text-green-400 text-center mt-2 font-mono">
+                  Potential: +{(parseFloat(megaOdds) * 10).toLocaleString()}€
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -302,56 +277,84 @@ export function PlayerBetsPanel() {
   );
 }
 
-// Mappings d'équipes (simplifié pour le rendu)
-function extractTeamsFromMatch(matchName: string): string[] {
-  const teamMappings: Record<string, string> = {
-    "maple leafs": "TOR",
-    toronto: "TOR",
-    canadiens: "MTL",
-    montreal: "MTL",
-    bruins: "BOS",
-    boston: "BOS",
-    rangers: "NYR",
-    islanders: "NYI",
-    devils: "NJD",
-    flyers: "PHI",
-    penguins: "PIT",
-    capitals: "WSH",
-    hurricanes: "CAR",
-    lightning: "TBL",
-    panthers: "FLA",
-    "red wings": "DET",
-    sabres: "BUF",
-    senators: "OTT",
-    "blue jackets": "CBJ",
-    jets: "WPG",
-    wild: "MIN",
-    blackhawks: "CHI",
-    blues: "STL",
-    predators: "NSH",
-    stars: "DAL",
-    avalanche: "COL",
-    coyotes: "ARI",
-    ducks: "ANA",
-    kings: "LAK",
-    sharks: "SJS",
-    "golden knights": "VGK",
-    kraken: "SEA",
-    canucks: "VAN",
-    flames: "CGY",
-    oilers: "EDM",
-    utah: "UTA",
+// Helpers techniques
+function getFullTeamName(abbr: string): string {
+  const teams: Record<string, string> = {
+    TOR: "Toronto Maple Leafs",
+    MTL: "Canadiens de Montréal",
+    BOS: "Boston Bruins",
+    NYR: "New York Rangers",
+    NYI: "New York Islanders",
+    NJD: "New Jersey Devils",
+    PHI: "Philadelphia Flyers",
+    PIT: "Pittsburgh Penguins",
+    WSH: "Washington Capitals",
+    CAR: "Carolina Hurricanes",
+    TBL: "Tampa Bay Lightning",
+    FLA: "Florida Panthers",
+    DET: "Detroit Red Wings",
+    BUF: "Buffalo Sabres",
+    OTT: "Ottawa Senators",
+    CBJ: "Columbus Blue Jackets",
+    WPG: "Winnipeg Jets",
+    MIN: "Minnesota Wild",
+    CHI: "Chicago Blackhawks",
+    STL: "St. Louis Blues",
+    NSH: "Nashville Predators",
+    DAL: "Dallas Stars",
+    COL: "Colorado Avalanche",
+    ANA: "Anaheim Ducks",
+    LAK: "Los Angeles Kings",
+    SJS: "San Jose Sharks",
+    VGK: "Vegas Golden Knights",
+    SEA: "Seattle Kraken",
+    VAN: "Vancouver Canucks",
+    CGY: "Calgary Flames",
+    EDM: "Edmonton Oilers",
+    UTA: "Utah Hockey Club",
+    ARI: "Arizona Coyotes",
   };
+  return teams[abbr.toUpperCase()] || abbr;
+}
+
+function extractTeamsFromMatch(matchName: string): string[] {
   const parts = matchName.split(/\s+(?:vs|@|at)\s+/i);
-  const teams: string[] = [];
-  parts.forEach((part) => {
-    const lower = part.toLowerCase();
-    for (const [key, abbr] of Object.entries(teamMappings)) {
-      if (lower.includes(key)) {
-        teams.push(abbr);
-        break;
-      }
-    }
-  });
-  return teams;
+  return parts.map((p) => getFullTeamNameFromSearch(p));
+}
+
+function getFullTeamNameFromSearch(p: string): string {
+  const lower = p.toLowerCase();
+  if (lower.includes("toronto") || lower.includes("maple leafs")) return "Toronto Maple Leafs";
+  if (lower.includes("montreal") || lower.includes("canadiens")) return "Canadiens de Montréal";
+  if (lower.includes("boston") || lower.includes("bruins")) return "Boston Bruins";
+  if (lower.includes("rangers")) return "New York Rangers";
+  if (lower.includes("islanders")) return "New York Islanders";
+  if (lower.includes("devils")) return "New Jersey Devils";
+  if (lower.includes("flyers")) return "Philadelphia Flyers";
+  if (lower.includes("penguins")) return "Pittsburgh Penguins";
+  if (lower.includes("capitals")) return "Washington Capitals";
+  if (lower.includes("hurricanes")) return "Carolina Hurricanes";
+  if (lower.includes("lightning")) return "Tampa Bay Lightning";
+  if (lower.includes("panthers")) return "Florida Panthers";
+  if (lower.includes("red wings")) return "Detroit Red Wings";
+  if (lower.includes("sabres")) return "Buffalo Sabres";
+  if (lower.includes("senators")) return "Ottawa Senators";
+  if (lower.includes("blue jackets")) return "Columbus Blue Jackets";
+  if (lower.includes("jets")) return "Winnipeg Jets";
+  if (lower.includes("wild")) return "Minnesota Wild";
+  if (lower.includes("blackhawks")) return "Chicago Blackhawks";
+  if (lower.includes("blues")) return "St. Louis Blues";
+  if (lower.includes("predators")) return "Nashville Predators";
+  if (lower.includes("stars")) return "Dallas Stars";
+  if (lower.includes("avalanche")) return "Colorado Avalanche";
+  if (lower.includes("ducks")) return "Anaheim Ducks";
+  if (lower.includes("kings")) return "Los Angeles Kings";
+  if (lower.includes("sharks")) return "San Jose Sharks";
+  if (lower.includes("golden knights")) return "Vegas Golden Knights";
+  if (lower.includes("kraken")) return "Seattle Kraken";
+  if (lower.includes("canucks")) return "Vancouver Canucks";
+  if (lower.includes("flames")) return "Calgary Flames";
+  if (lower.includes("oilers")) return "Edmonton Oilers";
+  if (lower.includes("utah")) return "Utah Hockey Club";
+  return p;
 }
