@@ -43,6 +43,16 @@ const TEAM_MAPPING: Record<string, string> = {
   "WPG": "Winnipeg Jets",
 };
 
+// Team ID to abbreviation mapping (NHL API uses team IDs)
+const TEAM_ID_TO_ABBR: Record<number, string> = {
+  1: "NJD", 2: "NYI", 3: "NYR", 4: "PHI", 5: "PIT", 6: "BOS",
+  7: "BUF", 8: "MTL", 9: "OTT", 10: "TOR", 12: "CAR", 13: "FLA",
+  14: "TBL", 15: "WSH", 16: "CHI", 17: "DET", 18: "NSH", 19: "STL",
+  20: "CGY", 21: "COL", 22: "EDM", 23: "VAN", 24: "ANA", 25: "DAL",
+  26: "LAK", 28: "SJS", 29: "CBJ", 30: "MIN", 52: "WPG", 53: "ARI",
+  54: "VGK", 55: "SEA", 59: "UTA",
+};
+
 interface GoalData {
   scorer: string;
   scorerTeamAbbr: string;
@@ -111,12 +121,145 @@ function extractTeamPim(boxscore: any, teamKey: 'homeTeam' | 'awayTeam'): number
   return 0;
 }
 
-// Helper to create a unique hash for deduplication
-function createGoalHash(gameDate: string, scorer: string, matchName: string, goalIndex: number): string {
-  return `${gameDate}_${scorer}_${matchName}_${goalIndex}`.toLowerCase().replace(/\s+/g, '_');
+// Build player ID to name mapping from boxscore data
+function buildPlayerNameMap(boxscore: any): Map<number, string> {
+  const playerMap = new Map<number, string>();
+  
+  // Extract from playerByGameStats
+  for (const teamKey of ['homeTeam', 'awayTeam']) {
+    const teamStats = boxscore.playerByGameStats?.[teamKey];
+    if (!teamStats) continue;
+    
+    const allPlayers = [
+      ...(teamStats.forwards || []),
+      ...(teamStats.defense || []),
+      ...(teamStats.goalies || [])
+    ];
+    
+    for (const player of allPlayers) {
+      if (player.playerId && player.name?.default) {
+        playerMap.set(player.playerId, player.name.default);
+      }
+    }
+  }
+  
+  // Also try rosterSpots if available
+  for (const teamKey of ['homeTeam', 'awayTeam']) {
+    const roster = boxscore[teamKey]?.roster || boxscore.rosterSpots?.[teamKey] || [];
+    for (const player of roster) {
+      if (player.playerId && player.firstName && player.lastName) {
+        playerMap.set(player.playerId, `${player.firstName.default || player.firstName} ${player.lastName.default || player.lastName}`);
+      }
+    }
+  }
+  
+  return playerMap;
 }
 
-// Fetch boxscore for a single game - using playerByGameStats for goals
+// Helper to create a unique hash for deduplication
+function createGoalHash(gameDate: string, scorer: string, matchName: string, period: number, timeInPeriod: string): string {
+  return `${gameDate}_${scorer}_${matchName}_${period}_${timeInPeriod}`.toLowerCase().replace(/\s+/g, '_');
+}
+
+// Helper to determine goal situation from situationCode
+function determineSituation(situationCode: string, goalModifier?: string): string {
+  // Check goalModifier first (more reliable)
+  if (goalModifier) {
+    const modifier = goalModifier.toLowerCase();
+    if (modifier.includes('power-play') || modifier.includes('powerplay') || modifier.includes('pp')) return 'PP';
+    if (modifier.includes('short-handed') || modifier.includes('shorthanded') || modifier.includes('sh')) return 'SH';
+    if (modifier.includes('empty-net') || modifier.includes('emptynet') || modifier.includes('en')) return 'EN';
+  }
+  
+  // Fallback to situationCode parsing
+  // situationCode format: "1551" = home goalie in, 5 skaters, 5 skaters, away goalie in
+  if (!situationCode || situationCode.length < 4) return 'EV';
+  
+  const homeSkaters = parseInt(situationCode[1]) || 5;
+  const awaySkaters = parseInt(situationCode[2]) || 5;
+  
+  if (homeSkaters > awaySkaters || awaySkaters > homeSkaters) return 'PP';
+  if (homeSkaters < awaySkaters || awaySkaters < homeSkaters) return 'SH';
+  
+  return 'EV';
+}
+
+// Fetch play-by-play for a single game to get REAL goal details with assists
+async function fetchGamePlayByPlay(gameId: string, homeAbbr: string, awayAbbr: string, playerNameMap: Map<number, string>): Promise<GoalData[]> {
+  try {
+    const url = `https://api-web.nhle.com/v1/gamecenter/${gameId}/play-by-play`;
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      console.log(`Failed to fetch play-by-play for game ${gameId}: ${response.status}`);
+      return [];
+    }
+
+    const data = await response.json();
+    const goals: GoalData[] = [];
+    
+    // Build player map from play-by-play data if needed
+    if (data.rosterSpots) {
+      for (const player of data.rosterSpots) {
+        if (player.playerId && player.firstName && player.lastName) {
+          const firstName = player.firstName?.default || player.firstName;
+          const lastName = player.lastName?.default || player.lastName;
+          playerNameMap.set(player.playerId, `${firstName} ${lastName}`);
+        }
+      }
+    }
+    
+    for (const play of data.plays || []) {
+      // Look for goal events
+      if (play.typeDescKey === 'goal') {
+        const details = play.details || {};
+        
+        // Get scorer name from player ID using our mapping
+        const scorerId = details.scoringPlayerId;
+        let scorerName = playerNameMap.get(scorerId) || '';
+        
+        if (!scorerName) {
+          console.log(`Unknown player ID ${scorerId} in game ${gameId}`);
+          continue;
+        }
+        
+        // Determine team abbreviation from eventOwnerTeamId
+        const teamId = details.eventOwnerTeamId;
+        const scorerTeamAbbr = TEAM_ID_TO_ABBR[teamId] || (teamId === data.homeTeam?.id ? homeAbbr : awayAbbr);
+        
+        // Get assist names using player ID mapping
+        const assist1Id = details.assist1PlayerId;
+        const assist2Id = details.assist2PlayerId;
+        const assist1Name = assist1Id ? playerNameMap.get(assist1Id) : undefined;
+        const assist2Name = assist2Id ? playerNameMap.get(assist2Id) : undefined;
+        
+        // Determine situation (PP, SH, EN, EV)
+        const situation = determineSituation(
+          play.situationCode || '', 
+          details.goalModifier || play.typeDescriptor?.modifier
+        );
+        
+        goals.push({
+          scorer: scorerName,
+          scorerTeamAbbr,
+          assist1: assist1Name,
+          assist2: assist2Name,
+          situation,
+          period: play.periodDescriptor?.number || 0,
+          timeInPeriod: play.timeInPeriod || '00:00',
+        });
+      }
+    }
+    
+    console.log(`Game ${gameId} play-by-play: ${goals.length} goals extracted`);
+    return goals;
+  } catch (error) {
+    console.error(`Error fetching play-by-play for game ${gameId}:`, error);
+    return [];
+  }
+}
+
+// Fetch boxscore for basic game info and PIM data
 async function fetchGameBoxscore(gameId: string): Promise<GameData | null> {
   try {
     const boxscoreUrl = `https://api-web.nhle.com/v1/gamecenter/${gameId}/boxscore`;
@@ -146,67 +289,12 @@ async function fetchGameBoxscore(gameId: string): Promise<GameData | null> {
     const homePim = extractTeamPim(boxscore, 'homeTeam');
     const awayPim = extractTeamPim(boxscore, 'awayTeam');
     
-    console.log(`Game ${gameId} - PIM extracted: home=${homePim}, away=${awayPim}`);
+    // Build player name map from boxscore
+    const playerNameMap = buildPlayerNameMap(boxscore);
+    console.log(`Game ${gameId} - ${playerNameMap.size} players mapped, PIM: home=${homePim}, away=${awayPim}`);
 
-    // Extract goals from playerByGameStats (since summary.scoring may be empty)
-    const goals: GoalData[] = [];
-    
-    // Process home team players
-    const homePlayerStats = boxscore.playerByGameStats?.homeTeam;
-    if (homePlayerStats) {
-      const allHomePlayers = [
-        ...(homePlayerStats.forwards || []),
-        ...(homePlayerStats.defense || [])
-      ];
-      
-      for (const player of allHomePlayers) {
-        if (player.goals && player.goals > 0) {
-          const playerName = player.name?.default || '';
-          // For each goal, create an entry (we don't have period info from this source)
-          for (let i = 0; i < player.goals; i++) {
-            const situation = player.powerPlayGoals > i ? 'PP' : 'EV';
-            goals.push({
-              scorer: playerName,
-              scorerTeamAbbr: homeAbbr,
-              assist1: undefined, // Can't determine assists from playerByGameStats
-              assist2: undefined,
-              situation,
-              period: 0, // Unknown from this source
-              timeInPeriod: '00:00',
-            });
-          }
-        }
-      }
-    }
-    
-    // Process away team players
-    const awayPlayerStats = boxscore.playerByGameStats?.awayTeam;
-    if (awayPlayerStats) {
-      const allAwayPlayers = [
-        ...(awayPlayerStats.forwards || []),
-        ...(awayPlayerStats.defense || [])
-      ];
-      
-      for (const player of allAwayPlayers) {
-        if (player.goals && player.goals > 0) {
-          const playerName = player.name?.default || '';
-          for (let i = 0; i < player.goals; i++) {
-            const situation = player.powerPlayGoals > i ? 'PP' : 'EV';
-            goals.push({
-              scorer: playerName,
-              scorerTeamAbbr: awayAbbr,
-              assist1: undefined,
-              assist2: undefined,
-              situation,
-              period: 0,
-              timeInPeriod: '00:00',
-            });
-          }
-        }
-      }
-    }
-    
-    console.log(`Game ${gameId} - Found ${goals.length} goals from player stats`);
+    // Fetch REAL goals from play-by-play endpoint (includes assists!)
+    const goals = await fetchGamePlayByPlay(gameId, homeAbbr, awayAbbr, playerNameMap);
 
     return {
       gameId,
@@ -262,7 +350,7 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    console.log('=== Starting NHL Stats Sync ===');
+    console.log('=== Starting NHL Stats Sync (with Play-By-Play for DUOs) ===');
     const startTime = Date.now();
 
     // Collect all unique game IDs from all teams
@@ -342,7 +430,11 @@ serve(async (req) => {
       }
     }
 
-    console.log(`Processed ${allGames.length} games with boxscore data`);
+    console.log(`Processed ${allGames.length} games with boxscore + play-by-play data`);
+
+    // Count goals with and without assists for logging
+    let goalsWithAssist = 0;
+    let goalsWithoutAssist = 0;
 
     // Prepare player stats for insertion
     const playerStatsToInsert: Array<{
@@ -358,18 +450,18 @@ serve(async (req) => {
     
     const seenGoals = new Set<string>();
 
-    let goalIndex = 0;
     for (const game of allGames) {
       for (const goal of game.goals) {
         // Skip if we don't have scorer info
         if (!goal.scorer || !goal.scorerTeamAbbr) continue;
         
-        // Create unique hash to prevent duplicates (using goalIndex for uniqueness)
+        // Create unique hash to prevent duplicates (using period + time for uniqueness)
         const goalHash = createGoalHash(
           game.gameDate, 
           goal.scorer, 
           game.matchName, 
-          goalIndex++
+          goal.period,
+          goal.timeInPeriod
         );
         
         if (seenGoals.has(goalHash)) continue;
@@ -377,6 +469,12 @@ serve(async (req) => {
         
         // Create duo string if there's a first assist
         const duo = goal.assist1 ? `${goal.scorer}+${goal.assist1}` : null;
+        
+        if (goal.assist1) {
+          goalsWithAssist++;
+        } else {
+          goalsWithoutAssist++;
+        }
         
         playerStatsToInsert.push({
           game_date: game.gameDate,
@@ -391,7 +489,7 @@ serve(async (req) => {
       }
     }
 
-    console.log(`Prepared ${playerStatsToInsert.length} goal records for insertion`);
+    console.log(`Prepared ${playerStatsToInsert.length} goal records (${goalsWithAssist} with assist, ${goalsWithoutAssist} without)`);
 
     // Insert player stats (in batches to avoid payload limits)
     let insertedCount = 0;
@@ -400,7 +498,7 @@ serve(async (req) => {
     for (let i = 0; i < playerStatsToInsert.length; i += insertBatchSize) {
       const batch = playerStatsToInsert.slice(i, i + insertBatchSize);
       
-      const { error: insertError, count } = await supabase
+      const { error: insertError } = await supabase
         .from('player_stats')
         .upsert(batch, { 
           onConflict: 'id',
@@ -454,6 +552,7 @@ serve(async (req) => {
 
     const duration = Date.now() - startTime;
     console.log(`=== NHL Stats Sync Complete in ${duration}ms ===`);
+    console.log(`📊 Duos created: ${goalsWithAssist} goals with assists`);
 
     return new Response(
       JSON.stringify({
@@ -461,6 +560,8 @@ serve(async (req) => {
         stats: {
           gamesProcessed: allGames.length,
           goalsRecorded: playerStatsToInsert.length,
+          goalsWithAssist,
+          goalsWithoutAssist,
           teamsUpdated,
           durationMs: duration,
         }
