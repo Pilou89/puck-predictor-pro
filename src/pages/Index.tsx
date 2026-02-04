@@ -222,9 +222,10 @@ const Index = () => {
               />
             </div>
 
-            {/* Bankroll Management - Full Width */}
-            <div className="mb-6">
+            {/* Bankroll & Learning - Side by Side */}
+            <div className="grid lg:grid-cols-2 gap-6 mb-6">
               <BankrollPanel />
+              <LearningPanel stats={displayStats} />
             </div>
 
             {/* AI Panels - Full Width */}
@@ -232,6 +233,7 @@ const Index = () => {
               <AIPicksPanel />
               <StrategicBettingPanel />
             </div>
+
             {/* Main Grid */}
             <div className="grid lg:grid-cols-3 gap-6">
               {/* Left Column - Matches */}
@@ -245,10 +247,9 @@ const Index = () => {
                 <ValueAlerts alerts={displayAlerts} />
               </div>
 
-              {/* Right Column - Stats & Learning */}
+              {/* Right Column - Stats & Players */}
               <div className="space-y-6">
                 <HotPlayers players={displayHotPlayers} />
-                <LearningPanel stats={displayStats} />
                 <SystemStatus 
                   cronJobs={displayCronJobs}
                   lastStatsSync={lastStatsSync}
