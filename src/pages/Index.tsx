@@ -9,11 +9,11 @@ import { NightAnalysis } from "@/components/dashboard/NightAnalysis";
 import { SystemStatus } from "@/components/dashboard/SystemStatus";
 import { AIPicksPanel } from "@/components/dashboard/AIPicksPanel";
 import { StrategicBettingPanel } from "@/components/dashboard/StrategicBettingPanel";
+import { BankrollPanel } from "@/components/dashboard/BankrollPanel";
 import { Match, BadgeType, PredictionStats } from "@/types/nhl";
 import { useNHLData } from "@/hooks/useNHLData";
 import { Users, Target, TrendingUp, Zap, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-
 // Convert API response to app types
 function convertGamesToMatches(games: any[]): Match[] {
   return games.map(game => ({
@@ -222,12 +222,16 @@ const Index = () => {
               />
             </div>
 
+            {/* Bankroll Management - Full Width */}
+            <div className="mb-6">
+              <BankrollPanel />
+            </div>
+
             {/* AI Panels - Full Width */}
-            <div className="grid lg:grid-cols-2 gap-6">
+            <div className="grid lg:grid-cols-2 gap-6 mb-6">
               <AIPicksPanel />
               <StrategicBettingPanel />
             </div>
-
             {/* Main Grid */}
             <div className="grid lg:grid-cols-3 gap-6">
               {/* Left Column - Matches */}
