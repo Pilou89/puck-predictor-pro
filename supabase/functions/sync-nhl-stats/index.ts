@@ -66,6 +66,51 @@ interface GameData {
   awayPim: number;
 }
 
+// Extract PIM with multiple fallback paths
+function extractTeamPim(boxscore: any, teamKey: 'homeTeam' | 'awayTeam'): number {
+  // Path 1: Direct on team object
+  if (boxscore[teamKey]?.pim !== undefined && boxscore[teamKey].pim > 0) {
+    return boxscore[teamKey].pim;
+  }
+  
+  // Path 2: In boxscore.boxscore.teamGameStats
+  if (boxscore.boxscore?.teamGameStats?.[teamKey]?.pim !== undefined) {
+    return boxscore.boxscore.teamGameStats[teamKey].pim;
+  }
+  
+  // Path 3: In summary.teamGameStats
+  if (boxscore.summary?.teamGameStats?.[teamKey]?.pim !== undefined) {
+    return boxscore.summary.teamGameStats[teamKey].pim;
+  }
+  
+  // Path 4: Calculate from individual players in playerByGameStats
+  const players = boxscore.playerByGameStats?.[teamKey];
+  if (players) {
+    const allPlayers = [
+      ...(players.forwards || []),
+      ...(players.defense || []),
+      ...(players.goalies || [])
+    ];
+    const totalPim = allPlayers.reduce((sum: number, p: any) => sum + (p.pim || 0), 0);
+    if (totalPim > 0) {
+      return totalPim;
+    }
+  }
+  
+  // Path 5: Try boxscore.boxscore.playerByGameStats
+  const boxscorePlayers = boxscore.boxscore?.playerByGameStats?.[teamKey];
+  if (boxscorePlayers) {
+    const allPlayers = [
+      ...(boxscorePlayers.forwards || []),
+      ...(boxscorePlayers.defense || []),
+      ...(boxscorePlayers.goalies || [])
+    ];
+    return allPlayers.reduce((sum: number, p: any) => sum + (p.pim || 0), 0);
+  }
+  
+  return 0;
+}
+
 // Helper to create a unique hash for deduplication
 function createGoalHash(gameDate: string, scorer: string, matchName: string, period: number, situation: string): string {
   return `${gameDate}_${scorer}_${matchName}_${period}_${situation}`.toLowerCase().replace(/\s+/g, '_');
@@ -91,8 +136,12 @@ async function fetchGameBoxscore(gameId: string): Promise<GameData | null> {
     
     const homeScore = boxscore.homeTeam?.score || 0;
     const awayScore = boxscore.awayTeam?.score || 0;
-    const homePim = boxscore.homeTeam?.pim || 0;
-    const awayPim = boxscore.awayTeam?.pim || 0;
+    
+    // Extract PIM using robust fallback logic
+    const homePim = extractTeamPim(boxscore, 'homeTeam');
+    const awayPim = extractTeamPim(boxscore, 'awayTeam');
+    
+    console.log(`Game ${gameId} - PIM extracted: home=${homePim}, away=${awayPim}`);
 
     // Extract goals from scoring summary
     const goals: GoalData[] = [];
