@@ -1,1 +1,16 @@
 project_id = "fzglqbxvtbbfyopujxca"
+
+[functions.get-games]
+verify_jwt = false
+
+[functions.sync-nhl-stats]
+verify_jwt = false
+
+[functions.sync-winamax-odds]
+verify_jwt = false
+
+[functions.validate-predictions]
+verify_jwt = false
+
+[functions.ai-analysis]
+verify_jwt = false
