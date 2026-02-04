@@ -6,6 +6,21 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
+// NHL Team abbreviation to full name mapping
+const TEAM_MAPPING: Record<string, string> = {
+  "ANA": "Anaheim Ducks", "BOS": "Boston Bruins", "BUF": "Buffalo Sabres",
+  "CGY": "Calgary Flames", "CAR": "Carolina Hurricanes", "CHI": "Chicago Blackhawks",
+  "COL": "Colorado Avalanche", "CBJ": "Columbus Blue Jackets", "DAL": "Dallas Stars",
+  "DET": "Detroit Red Wings", "EDM": "Edmonton Oilers", "FLA": "Florida Panthers",
+  "LAK": "Los Angeles Kings", "MIN": "Minnesota Wild", "MTL": "Montreal Canadiens",
+  "NSH": "Nashville Predators", "NJD": "New Jersey Devils", "NYI": "New York Islanders",
+  "NYR": "New York Rangers", "OTT": "Ottawa Senators", "PHI": "Philadelphia Flyers",
+  "PIT": "Pittsburgh Penguins", "SJS": "San Jose Sharks", "SEA": "Seattle Kraken",
+  "STL": "St. Louis Blues", "TBL": "Tampa Bay Lightning", "TOR": "Toronto Maple Leafs",
+  "UTA": "Utah Hockey Club", "VAN": "Vancouver Canucks", "VGK": "Vegas Golden Knights",
+  "WSH": "Washington Capitals", "WPG": "Winnipeg Jets",
+};
+
 // Basket bet types configuration
 const BASKET_TYPES = {
   SAFE: { 
@@ -30,7 +45,7 @@ const BASKET_TYPES = {
     emoji: '🎰',
     description: 'Pari à grosse cote pour le fun',
     minOdds: 4.00,
-    allowedTypes: ['GOAL_SCORER', 'DUO'],
+    allowedTypes: ['GOAL_SCORER', 'DUO', 'H2H_OUTSIDER'],
     stake: 0.50,
   },
 };
@@ -97,7 +112,7 @@ serve(async (req) => {
 
     // Group odds by market type
     const h2hOdds = allOdds?.filter(o => o.market_type === 'h2h') || [];
-    const goalScorerOdds = allOdds?.filter(o => o.market_type === 'player_anytime_goal_scorer') || [];
+    const goalScorerOdds = allOdds?.filter(o => o.market_type === 'player_goal_scorer_anytime') || [];
     const pointsOdds = allOdds?.filter(o => o.market_type === 'player_points') || [];
 
     // Fetch player stats (last 5 days for performance)
@@ -278,14 +293,51 @@ serve(async (req) => {
         };
       });
 
+    // Outsider H2H for FUN fallback (high odds >= 4.00)
+    const h2hOutsiders = h2hOdds
+      .filter(o => o.price >= 4.00)
+      .slice(0, 5)
+      .map(o => ({
+        selection: o.selection,
+        match: o.match_name,
+        odds: o.price,
+        type: 'H2H_OUTSIDER',
+      }));
+    
+    console.log(`H2H outsiders disponibles pour FUN fallback: ${h2hOutsiders.length}`);
+
     // SEULEMENT les duos avec les deux joueurs ACTIFS
+    // Enrichir avec le match de ce soir s'il existe
+    const todayMatchNames = h2hOdds.map(o => o.match_name);
+    
     const topDuos = Array.from(activeDuos.entries())
       .filter(([_, d]) => d.count >= 2 && d.isActive)
       .sort((a, b) => b[1].count - a[1].count)
       .slice(0, 10)
-      .map(([duo, data]) => ({ duo, connections: data.count, players: data.players }));
+      .map(([duo, data]) => {
+        // Trouver si l'équipe du duo joue ce soir
+        const teamAbbr = data.team;
+        const teamFullName = TEAM_MAPPING[teamAbbr] || '';
+        const todayMatch = todayMatchNames.find(m => 
+          m.includes(teamFullName) || m.includes(teamAbbr)
+        );
+        
+        // Trouver les cotes H2H du match
+        const matchOdds = todayMatch ? h2hOdds.filter(o => o.match_name === todayMatch) : [];
+        const teamOdd = matchOdds.find(o => o.selection === teamFullName || o.selection.includes(teamAbbr));
+        
+        return { 
+          duo, 
+          connections: data.count, 
+          players: data.players,
+          team: teamAbbr,
+          todayMatch,
+          teamOdds: teamOdd?.price,
+        };
+      })
+      .filter(d => d.todayMatch); // Ne garder que les duos qui jouent ce soir
 
-    console.log(`Données envoyées à l'IA: ${topGoalScorers.length} buteurs actifs, ${topDuos.length} duos actifs`);
+    console.log(`Données envoyées à l'IA: ${topGoalScorers.length} buteurs actifs, ${topDuos.length} duos actifs qui jouent ce soir`);
 
     // GUARD: Si aucune donnée exploitable, retourner un panier vide avec message explicatif
     if (topGoalScorers.length === 0 && topH2H.length === 0) {
@@ -332,6 +384,11 @@ ${topGoalScorers.length > 0 ? topGoalScorers.map(p =>
   `- ${p.player}: @${p.odds.toFixed(2)} | ${p.goals5}G en ${p.games5}M${p.opponentB2B ? ' 🔋B2B' : ''}${p.duo ? ` | Duo:${p.duo}` : ''}`
 ).join('\n') : '(Aucun buteur disponible)'}
 
+### H2H Outsiders (grosse cote >= 4.00) pour FUN fallback:
+${h2hOutsiders.length > 0 ? h2hOutsiders.map(o => 
+  `- ${o.selection} @${o.odds.toFixed(2)} (${o.match}) - OUTSIDER`
+).join('\n') : '(Aucun outsider disponible)'}
+
 ### Duos Performants (joueurs actifs et coéquipiers):
 ${topDuos.length > 0 ? topDuos.map(d => `- ${d.duo}: ${d.connections} connexions cette saison`).join('\n') : '(Aucun duo disponible - le bloc DUO doit être null)'}
 
@@ -352,11 +409,12 @@ ${topDuos.length > 0 ? topDuos.map(d => `- ${d.duo}: ${d.connections} connexions
 - ⚠️ Si "Duos Performants" est vide: mettre null (NE PAS INVENTER)
 
 ### BLOC FUN (🎰 Loto):
-- Type: GOAL_SCORER avec grosse cote ou pari risqué
+- Type: GOAL_SCORER avec grosse cote ou H2H_OUTSIDER
 - Cote minimum: 4.00
 - Mise fixe: 0.50€
-- Rechercher les opportunités (B2B adversaire, joueur en forme)
-- ⚠️ Si "Buteurs" est vide: mettre null
+- Priorité: buteur en forme avec grosse cote
+- Fallback: si aucun buteur disponible, utiliser un H2H outsider (cote >= 4.00)
+- ⚠️ Si aucun buteur ET aucun outsider: mettre null
 
 ### CALCUL DE COUVERTURE CRITIQUE:
 Le gain net potentiel du SAFE doit couvrir la perte des mises DUO + FUN.
