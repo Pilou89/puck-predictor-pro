@@ -8,7 +8,6 @@ const corsHeaders = {
 };
 
 serve(async (req) => {
-  // Handle CORS
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
@@ -23,26 +22,25 @@ serve(async (req) => {
     }
 
     const supabase = createClient(supabaseUrl, supabaseKey);
-
     console.log('Starting Winamax odds sync...');
 
-    // Fetch NHL odds from The Odds API
-    // Using EU region to get Winamax
     const baseUrl = 'https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds';
     
-    // Markets to fetch
-    const markets = ['h2h', 'player_anytime_goal_scorer', 'player_points'];
+    // Seul le marché h2h est disponible pour la NHL en région FR
+    const markets = ['h2h'];
     const oddsToInsert: any[] = [];
 
     for (const market of markets) {
       try {
-        const url = `${baseUrl}?apiKey=${oddsApiKey}&regions=eu&markets=${market}&bookmakers=winamax`;
-        console.log(`Fetching ${market} odds...`);
+        // Utiliser la région FR pour avoir Winamax (sans filtre bookmaker)
+        const url = `${baseUrl}?apiKey=${oddsApiKey}&regions=fr&markets=${market}`;
+        console.log(`Fetching ${market} odds from FR region...`);
         
         const response = await fetch(url);
         
         if (!response.ok) {
-          console.error(`Failed to fetch ${market} odds: ${response.status}`);
+          const errorText = await response.text();
+          console.error(`Failed to fetch ${market} odds: ${response.status} - ${errorText}`);
           continue;
         }
 
@@ -52,13 +50,18 @@ serve(async (req) => {
         for (const game of data) {
           const commenceTime = new Date(game.commence_time);
           const matchName = `${game.away_team} @ ${game.home_team}`;
+          
+          // Log des bookmakers disponibles pour debug
+          const bookmakerKeys = game.bookmakers?.map((b: any) => b.key) || [];
+          console.log(`Match: ${matchName} - Bookmakers: ${bookmakerKeys.join(', ')}`);
 
-          // Find Winamax bookmaker
-          const winamax = game.bookmakers?.find((b: any) => 
-            b.key === 'winamax' || b.title?.toLowerCase().includes('winamax')
-          );
+          // Chercher Winamax FR avec la bonne clé
+          const winamax = game.bookmakers?.find((b: any) => b.key === 'winamax_fr');
 
-          if (!winamax) continue;
+          if (!winamax) {
+            console.log(`No Winamax for ${matchName}`);
+            continue;
+          }
 
           for (const marketData of winamax.markets || []) {
             for (const outcome of marketData.outcomes || []) {
@@ -67,11 +70,7 @@ serve(async (req) => {
                 match_name: matchName,
                 selection: outcome.name,
                 price: outcome.price,
-                market_type: market === 'player_anytime_goal_scorer' 
-                  ? 'player_anytime_goal_scorer' 
-                  : market === 'player_points' 
-                    ? 'player_points' 
-                    : 'h2h',
+                market_type: 'h2h',
                 fetched_at: new Date().toISOString(),
               });
             }
@@ -82,11 +81,9 @@ serve(async (req) => {
       }
     }
 
-    console.log(`Total odds collected: ${oddsToInsert.length}`);
+    console.log(`Total Winamax odds collected: ${oddsToInsert.length}`);
 
-    // Insert odds into database
     if (oddsToInsert.length > 0) {
-      // Delete old odds for matches that are being updated
       const matchNames = [...new Set(oddsToInsert.map(o => o.match_name))];
       
       await supabase
@@ -94,7 +91,6 @@ serve(async (req) => {
         .delete()
         .in('match_name', matchNames);
 
-      // Insert new odds
       const { error: insertError } = await supabase
         .from('winamax_odds')
         .insert(oddsToInsert);
@@ -104,10 +100,9 @@ serve(async (req) => {
         throw insertError;
       }
 
-      console.log(`Inserted ${oddsToInsert.length} odds records`);
+      console.log(`Inserted ${oddsToInsert.length} Winamax odds records`);
     }
 
-    // Update cron config last_run_at
     await supabase
       .from('cron_config')
       .update({ last_run_at: new Date().toISOString() })
