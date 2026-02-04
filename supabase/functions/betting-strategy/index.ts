@@ -115,7 +115,7 @@ serve(async (req) => {
     // Fetch ALL recent stats to check player activity (last 10 days)
     const { data: activityStats } = await supabase
       .from('player_stats')
-      .select('scorer, game_date')
+      .select('scorer, game_date, team_abbr')
       .gte('game_date', tenDaysAgo)
       .order('game_date', { ascending: false });
 
@@ -127,14 +127,21 @@ serve(async (req) => {
     const teamMetaMap = new Map(teamMeta?.map(t => [t.team_abbr, t]) || []);
 
     // VÉRIFICATION DE L'EFFECTIF: Construire la map d'activité des joueurs
-    const playerActivity = new Map<string, { lastGameDate: string; gamesLast10Days: number }>();
+    const playerActivity = new Map<string, { lastGameDate: string; gamesLast10Days: number; team: string }>();
     for (const stat of activityStats || []) {
       const key = stat.scorer.toLowerCase();
       if (!playerActivity.has(key)) {
-        playerActivity.set(key, { lastGameDate: stat.game_date, gamesLast10Days: 0 });
+        // On prend l'équipe du match le plus récent (première entrée car trié par date desc)
+        playerActivity.set(key, { lastGameDate: stat.game_date, gamesLast10Days: 0, team: stat.team_abbr });
       }
       playerActivity.get(key)!.gamesLast10Days++;
     }
+
+    // Fonction pour obtenir l'équipe actuelle d'un joueur (basée sur son dernier match)
+    const getPlayerCurrentTeam = (playerName: string): string | null => {
+      const activity = playerActivity.get(playerName.toLowerCase());
+      return activity?.team || null;
+    };
 
     // Fonction pour vérifier si un joueur est actif (joué dans les 3 derniers matchs / 10 jours)
     const isPlayerActive = (playerName: string): boolean => {
@@ -179,8 +186,8 @@ serve(async (req) => {
     }
 
     // Build duo stats from season data (SEULEMENT depuis 2026-01-01)
-    // ET vérifier que les deux joueurs du duo sont actifs
-    const duoStats = new Map<string, { count: number; players: string[]; isActive: boolean }>();
+    // ET vérifier que les deux joueurs du duo sont actifs ET dans la même équipe
+    const duoStats = new Map<string, { count: number; players: string[]; isActive: boolean; team: string }>();
     for (const stat of seasonStats || []) {
       if (stat.duo) {
         const duoKey = stat.duo.toLowerCase();
@@ -189,19 +196,30 @@ serve(async (req) => {
         // Vérifier que les deux joueurs sont actifs
         const bothActive = players.every((p: string) => isPlayerActive(p));
         
+        // NOUVEAU: Vérifier que les deux joueurs sont dans la même équipe actuellement
+        const player1Team = getPlayerCurrentTeam(players[0]);
+        const player2Team = getPlayerCurrentTeam(players[1]);
+        const sameTeam = player1Team && player2Team && player1Team === player2Team;
+        
         if (!duoStats.has(duoKey)) {
-          duoStats.set(duoKey, { count: 0, players, isActive: bothActive });
+          duoStats.set(duoKey, { count: 0, players, isActive: bothActive && sameTeam, team: stat.team_abbr });
         }
         const d = duoStats.get(duoKey)!;
         d.count++;
-        // Mettre à jour le statut actif (si un des deux devient inactif, le duo est inactif)
-        d.isActive = bothActive;
+        // Mettre à jour le statut actif (si un des deux devient inactif ou change d'équipe, le duo est inactif)
+        d.isActive = bothActive && sameTeam;
       }
     }
 
-    // Filtrer les duos inactifs
+    // Filtrer les duos inactifs ou dont les joueurs ne sont plus coéquipiers
     const activeDuos = new Map([...duoStats].filter(([_, d]) => d.isActive));
     console.log(`Duos: ${duoStats.size} total, ${activeDuos.size} actifs (depuis ${duoStartDate})`);
+    
+    // Log des duos rejetés pour debug (transferts détectés)
+    const rejectedDuos = [...duoStats].filter(([_, d]) => !d.isActive);
+    if (rejectedDuos.length > 0) {
+      console.log(`Duos REJETÉS (inactifs ou équipes différentes): ${rejectedDuos.slice(0, 5).map(([name]) => name).join(', ')}`);
+    }
     
     // Log des joueurs inactifs pour debug
     const inactivePlayers = [...playerActivity.entries()]
@@ -269,23 +287,53 @@ serve(async (req) => {
 
     console.log(`Données envoyées à l'IA: ${topGoalScorers.length} buteurs actifs, ${topDuos.length} duos actifs`);
 
+    // GUARD: Si aucune donnée exploitable, retourner un panier vide avec message explicatif
+    if (topGoalScorers.length === 0 && topH2H.length === 0) {
+      console.log('⚠️ Données insuffisantes - panier vide retourné');
+      return new Response(
+        JSON.stringify({ 
+          success: true, 
+          basket: {
+            timestamp: now.toISOString(),
+            totalStake: 0,
+            totalPotentialGain: 0,
+            isCovered: false,
+            coverageDetails: "Aucune donnée disponible",
+            safe: null,
+            duo: null,
+            fun: null,
+            summary: "⚠️ Données insuffisantes. Synchronisez les cotes et statistiques avant de générer un panier."
+          }
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+      );
+    }
+
     // Build prompt for AI
     const basketPrompt = `Tu es un expert en stratégie de paris NHL. Génère LE PANIER DU SOIR avec exactement 3 paris distincts.
+
+## RÈGLES CRITIQUES (À RESPECTER ABSOLUMENT)
+
+⛔ NE JAMAIS inventer de duos ou de joueurs qui ne sont pas dans les données ci-dessous.
+⛔ Si la section "Duos Performants" est vide, le bloc DUO DOIT être null.
+⛔ Si la section "Buteurs" est vide, les blocs DUO et FUN DOIVENT être null.
+⛔ Utiliser UNIQUEMENT les joueurs listés dans "Buteurs pour les blocs DUO et FUN".
+⛔ Ne JAMAIS utiliser tes connaissances générales sur les joueurs NHL.
 
 ## DONNÉES DISPONIBLES
 
 ### Cotes Victoire (H2H) pour le bloc SAFE:
-${topH2H.map(h => 
+${topH2H.length > 0 ? topH2H.map(h => 
   `- ${h.selection} @${h.odds.toFixed(2)} (${h.match})${h.opponentB2B ? ' 🔋Adv. B2B' : ''}${h.teamB2B ? ' ⚠️En B2B' : ''}`
-).join('\n')}
+).join('\n') : '(Aucune cote H2H disponible)'}
 
 ### Buteurs pour les blocs DUO et FUN:
-${topGoalScorers.map(p => 
+${topGoalScorers.length > 0 ? topGoalScorers.map(p => 
   `- ${p.player}: @${p.odds.toFixed(2)} | ${p.goals5}G en ${p.games5}M${p.opponentB2B ? ' 🔋B2B' : ''}${p.duo ? ` | Duo:${p.duo}` : ''}`
-).join('\n')}
+).join('\n') : '(Aucun buteur disponible)'}
 
-### Duos Performants (depuis le début de saison):
-${topDuos.map(d => `- ${d.duo}: ${d.connections} connexions cette saison`).join('\n')}
+### Duos Performants (joueurs actifs et coéquipiers):
+${topDuos.length > 0 ? topDuos.map(d => `- ${d.duo}: ${d.connections} connexions cette saison`).join('\n') : '(Aucun duo disponible - le bloc DUO doit être null)'}
 
 ## RÈGLES STRICTES DU PANIER
 
@@ -294,18 +342,21 @@ ${topDuos.map(d => `- ${d.duo}: ${d.connections} connexions cette saison`).join(
 - Confiance OBLIGATOIRE > 85%
 - Mise fixe: 2.00€
 - Critères de sélection: équipe favorite, adversaire en B2B, ou équipe avec momentum
+- Si aucune cote H2H disponible: mettre null
 
 ### BLOC DUO (👥 Duo):
 - Type: DUO ou GOAL_SCORER d'un joueur membre d'un duo performant
 - Cote OBLIGATOIRE entre 3.00 et 5.00
 - Mise fixe: 1.00€
-- Doit s'appuyer sur les duos listés ci-dessus
+- Doit s'appuyer sur les duos listés ci-dessus UNIQUEMENT
+- ⚠️ Si "Duos Performants" est vide: mettre null (NE PAS INVENTER)
 
 ### BLOC FUN (🎰 Loto):
 - Type: GOAL_SCORER avec grosse cote ou pari risqué
 - Cote minimum: 4.00
 - Mise fixe: 0.50€
 - Rechercher les opportunités (B2B adversaire, joueur en forme)
+- ⚠️ Si "Buteurs" est vide: mettre null
 
 ### CALCUL DE COUVERTURE CRITIQUE:
 Le gain net potentiel du SAFE doit couvrir la perte des mises DUO + FUN.
@@ -331,7 +382,7 @@ Donc SAFE.odds >= 1.75 minimum pour couvrir les pertes.
     "odds": 1.85,
     "confidence": 88,
     "reasoning": "Explication courte"
-  },
+  } ou null,
   "duo": {
     "id": "duo-1",
     "type": "GOAL_SCORER",
@@ -340,7 +391,7 @@ Donc SAFE.odds >= 1.75 minimum pour couvrir les pertes.
     "odds": 3.50,
     "confidence": 65,
     "reasoning": "Membre du duo X+Y (N connexions)"
-  },
+  } ou null,
   "fun": {
     "id": "fun-1",
     "type": "GOAL_SCORER",
@@ -349,11 +400,11 @@ Donc SAFE.odds >= 1.75 minimum pour couvrir les pertes.
     "odds": 5.00,
     "confidence": 45,
     "reasoning": "Opportunité loto: adversaire en B2B"
-  },
+  } ou null,
   "summary": "Résumé du panier en 1-2 phrases"
 }
 
-Génère exactement 3 paris. Si les données ne permettent pas un bloc, mets null.`;
+Génère le panier. Si les données ne permettent pas un bloc, mets null. NE JAMAIS INVENTER.`;
 
     console.log('Calling Lovable AI for basket...');
 
