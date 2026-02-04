@@ -1,270 +1,209 @@
 
-# Plan : Restructurer les Piliers avec Paris Parallèles et Apprentissage IA
+# Plan : Combinaisons JOUEURS Automatiques avec Apprentissage IA
 
 ## Objectif
 
-Transformer la structure actuelle pour avoir deux piliers indépendants avec les mêmes trois types de paris chacun, et implémenter un système d'apprentissage qui ajuste les prévisions en fonction des résultats historiques.
+Transformer le `SystemBetBuilder` pour que l'IA propose **3 combinaisons joueurs automatiques** (buteurs/points) avec un système de récupération de mise intégré, tout en apprenant de ses erreurs.
 
 ## Nouvelle Architecture
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────────┐
-│                           DASHBOARD RESTRUCTURÉ                             │
-├────────────────────────────────┬───────────────────────────────────────────┤
-│      PILIER ÉQUIPE (Auto)      │       PILIER JOUEURS (IA + Manuel)        │
-├────────────────────────────────┼───────────────────────────────────────────┤
-│  🛡️ SAFE (1.40-1.80)           │  🛡️ SAFE (confiance > 85%)                │
-│  🎲 FUN (3.00-4.50)            │  🎲 FUN (cote > 4.00)                      │
-│  🎰 SUPER COMBO (≥ 4.50)       │  🎰 SUPER COMBO (combiné buteurs)          │
-├────────────────────────────────┴───────────────────────────────────────────┤
-│                     PANIER STRATÉGIQUE DU SOIR                              │
-│  Combine les meilleures sélections des deux piliers + BLOC DUO             │
+│                    SUPER COMBO IA - JOUEURS                                 │
 ├────────────────────────────────────────────────────────────────────────────┤
-│                       MODULE D'APPRENTISSAGE IA                             │
-│  Ajuste les coefficients de confiance selon les résultats passés           │
-└────────────────────────────────────────────────────────────────────────────┘
+│                                                                             │
+│  🛡️ COMBO SAFE                    │  🎲 COMBO FUN                          │
+│  Système 2/3 ou 2/4               │  Système 2/4 ou 3/4                    │
+│  Cotes 2.00-3.00 par joueur       │  Cotes 2.50-4.00 par joueur            │
+│  Récupère ~80% mise si 2 OK       │  Équilibre risque/gain                 │
+│                                   │                                         │
+├───────────────────────────────────┴─────────────────────────────────────────┤
+│                                                                             │
+│  🎰 SUPER COMBO                                                             │
+│  Système 3/5 ou 4/5                                                         │
+│  Cotes 3.00-5.00+ par joueur                                                │
+│  Gros gains potentiels                                                      │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  📊 Apprentissage IA                                                        │
+│  - Historique des combos placés vs résultats                                │
+│  - Ajustement automatique des joueurs favorisés                             │
+│  - Amélioration des suggestions au fil du temps                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Fichiers à Créer/Modifier
+## Modifications Techniques
+
+### 1. Mise à Jour Edge Function `suggest-combo/index.ts`
+
+Changer le prompt IA pour proposer 3 combinaisons **100% joueurs** :
+
+```typescript
+const comboPrompt = `Tu es un expert en paris sportifs NHL. 
+Analyse les matchs de ce soir et propose 3 combinaisons JOUEURS optimales.
+
+## RÈGLES IMPORTANTES:
+1. UNIQUEMENT des buteurs ou pointeurs (pas d'équipes)
+2. Chaque combo = sélections JOUEURS uniquement
+
+## 3 COMBINAISONS À PROPOSER:
+
+### COMBO SAFE (récupération de mise)
+- Système 2/3 ou 2/4
+- 3-4 joueurs avec cotes 2.00-3.00
+- Objectif: Si 2 sélections passent, on récupère ~80% de la mise
+- Privilégier joueurs réguliers, adversaires fatigués (B2B)
+
+### COMBO FUN (équilibre)
+- Système 2/4 ou 3/4
+- 3-4 joueurs avec cotes 2.50-4.00
+- Bon ratio risque/gain
+
+### SUPER COMBO (gros gains)
+- Système 3/5 ou 4/5
+- 4-5 joueurs avec cotes 3.50-6.00
+- Joueurs en feu avec opportunités PP
+
+## CALCUL RÉCUPÉRATION MISE (SAFE):
+Pour un système 2/3 avec mise 1€/combo (3 combos = 3€):
+- Si 3/3 passent: Gain = (cote1*cote2 + cote1*cote3 + cote2*cote3) * 1€
+- Si 2/3 passent: Gain = coteA*coteB * 1€ 
+- Objectif SAFE: 2 sélections gagnantes = ~2.40€ (récup 80% de 3€)
+
+## INTÉGRATION APPRENTISSAGE:
+${learningContext} // Historique des joueurs et leurs performances
+
+Réponds en JSON avec minRecoveryPercent pour le SAFE
+`;
+```
+
+### 2. Nouveau Schéma de Réponse IA
+
+```typescript
+interface AIPlayerCombo {
+  name: string;  // "Combo SAFE Joueurs 2/3"
+  type: 'SAFE' | 'FUN' | 'SUPER_COMBO';
+  systemType: string;  // "2/3"
+  stakePerCombo: number;  // 0.50€
+  totalStake: number;  // 1.50€ (3 combos)
+  
+  selections: {
+    name: string;  // "Connor McDavid"
+    team: string;  // "EDM"
+    match: string;  // "EDM vs CGY"
+    betType: 'Buteur' | 'Point' | 'But+Passe';
+    estimatedOdds: number;
+    reason: string;
+    learningScore: number;  // Ajustement IA basé sur l'historique
+  }[];
+  
+  // Calculs automatiques
+  combinationsCount: number;
+  potentialGains: {
+    min: number;  // Si minimum de sélections gagnantes
+    max: number;  // Si toutes gagnantes
+  };
+  
+  // Spécifique SAFE
+  minRecoveryPercent?: number;  // "Si 2/3 OK, récupère X% de la mise"
+  
+  confidence: number;
+  reasoning: string;
+}
+```
+
+### 3. Intégration Apprentissage dans le Prompt
+
+Récupérer les métriques avant d'appeler l'IA :
+
+```typescript
+// Dans suggest-combo/index.ts
+const { data: learningMetrics } = await supabase
+  .from('learning_metrics')
+  .select('*')
+  .eq('metric_type', 'player')
+  .order('wins', { ascending: false });
+
+const learningContext = (learningMetrics || [])
+  .filter(m => m.total >= 3)
+  .map(m => `${m.metric_key}: ${Math.round(m.wins/m.total*100)}% win (${m.total} paris), ajustement ${m.confidence_adjustment > 0 ? '+' : ''}${m.confidence_adjustment}%`)
+  .join('\n');
+
+// Ajouter au prompt:
+// "## HISTORIQUE APPRENTISSAGE (favoriser les joueurs avec bon score):
+// ${learningContext}"
+```
+
+### 4. Mise à Jour `SystemBetBuilder.tsx`
+
+- Affichage des 3 combos joueurs en cartes cliquables
+- Calcul automatique de la récupération de mise pour le SAFE
+- Bouton "Placer ce combo" pour chaque suggestion
+- Plus besoin de saisie manuelle
+
+```typescript
+// Affichage du % de récupération pour SAFE
+{combo.type === 'SAFE' && combo.minRecoveryPercent && (
+  <div className="p-2 rounded bg-success/10 border border-success/20">
+    <p className="text-xs text-success">
+      🛡️ Si {combo.systemType.split('/')[0]} sélections passent: 
+      récupération {combo.minRecoveryPercent}% de la mise
+    </p>
+  </div>
+)}
+```
+
+### 5. Enrichissement Table `learning_metrics`
+
+Ajouter le tracking des combos IA :
+
+```sql
+-- Ajouter une colonne pour tracker la source
+ALTER TABLE learning_metrics 
+ADD COLUMN IF NOT EXISTS combo_type TEXT;
+
+-- Tracker les combos SAFE, FUN, SUPER_COMBO séparément
+-- metric_type = 'combo', metric_key = 'SAFE' / 'FUN' / 'SUPER_COMBO'
+```
+
+### 6. Mise à Jour `learn-from-results/index.ts`
+
+Tracker les performances des combos IA :
+
+```typescript
+// Détecter les paris système
+if (bet.bet_type?.startsWith('SYSTEM_')) {
+  const comboType = bet.notes?.includes('[SAFE]') ? 'SAFE' 
+    : bet.notes?.includes('[FUN]') ? 'FUN'
+    : 'SUPER_COMBO';
+  
+  updateMetric('combo', comboType, isWin, roiPercent);
+}
+
+// Extraire les joueurs du notes
+const playerMatches = bet.notes?.match(/([A-Z][a-z]+ [A-Z][a-z]+)/g);
+playerMatches?.forEach(player => {
+  updateMetric('player', player.toLowerCase(), isWin, roiPercent);
+});
+```
+
+## Fichiers à Modifier
 
 | Fichier | Action | Description |
 |---------|--------|-------------|
-| `TeamPillarPanel.tsx` | Modifier | Ajouter SAFE, FUN, SUPER COMBO pour équipes |
-| `PlayerPillarPanel.tsx` | Modifier | Ajouter SAFE, FUN, SUPER COMBO pour joueurs |
-| `StrategicBasketPanel.tsx` | Modifier | Combiner les 6 blocs + DUO séparé |
-| `LearningPanel.tsx` | Modifier | Afficher les métriques d'apprentissage |
-| `betting-strategy/index.ts` | Modifier | Intégrer l'apprentissage des résultats |
-| `validate-predictions/index.ts` | Modifier | Enrichir avec métriques de feedback |
-| `learn-from-results/index.ts` | Créer | Calculer les ajustements de confiance |
+| `supabase/functions/suggest-combo/index.ts` | Modifier | Prompt 100% joueurs, intégration learning, calcul récupération |
+| `src/components/dashboard/SystemBetBuilder.tsx` | Modifier | Affichage 3 combos joueurs, % récupération, sans saisie manuelle |
+| `supabase/functions/learn-from-results/index.ts` | Modifier | Tracker joueurs individuels et types de combos |
 
-## Détails Techniques
+## Flux Utilisateur Final
 
-### 1. Pilier ÉQUIPE (100% Automatique)
-
-Trois blocs distincts basés sur les cotes H2H Winamax FR :
-
-```typescript
-// TeamPillarPanel.tsx - Nouvelle structure
-interface TeamPillarData {
-  safeBets: TeamBet[];       // Cote 1.40 - 1.80
-  funBets: TeamBet[];        // Cote 3.00 - 4.50 (risque modéré)
-  superComboBets: TeamBet[]; // Cote >= 4.50 (outsiders)
-  learningBoosts: Map<string, number>; // Ajustements IA
-}
-
-// Catégorisation des cotes
-const categorizeBets = (h2hOdds: Odd[], learningBoosts: Map<string, number>) => {
-  return {
-    safe: h2hOdds.filter(o => o.price >= 1.40 && o.price <= 1.80),
-    fun: h2hOdds.filter(o => o.price > 1.80 && o.price < 4.50),
-    superCombo: h2hOdds.filter(o => o.price >= 4.50),
-  };
-};
-```
-
-### 2. Pilier JOUEURS (IA + Saisie Manuelle)
-
-Structure parallèle avec trois blocs :
-
-```typescript
-// PlayerPillarPanel.tsx - Nouvelle structure
-interface PlayerPillarData {
-  safePlayers: PlayerAnalysis[];      // Confiance > 85%
-  funPlayers: PlayerAnalysis[];       // Cote manuelle 3.00-4.50
-  superComboPlayers: PlayerAnalysis[]; // Pour combiné multi-buteurs
-}
-
-// Interface de saisie manuelle pour chaque catégorie
-const renderPlayerCategory = (
-  players: PlayerAnalysis[],
-  category: 'SAFE' | 'FUN' | 'SUPER_COMBO',
-  onOddsInput: (playerId: string, odds: number) => void
-) => {
-  // Affiche les joueurs avec champ de saisie cote Winamax
-};
-```
-
-### 3. Super Combo FUN (Nouveau Bloc)
-
-Le Super Combo combine plusieurs éléments à haute cote :
-
-```typescript
-// Types de Super Combo possibles
-type SuperComboType = 
-  | 'MULTI_TEAM'      // 2+ équipes outsiders
-  | 'MULTI_SCORER'    // 2+ buteurs à grosse cote
-  | 'TEAM_PLUS_SCORER'; // 1 équipe outsider + 1 buteur
-
-interface SuperComboBet {
-  id: string;
-  type: SuperComboType;
-  selections: Array<{
-    name: string;
-    odds: number;
-    source: 'team' | 'player';
-  }>;
-  combinedOdds: number;  // Multiplication des cotes
-  stake: number;         // Mise fixe 0.50€
-  potentialGain: number;
-}
-
-// Calcul de la cote combinée
-const calculateCombinedOdds = (selections: Selection[]): number => {
-  return selections.reduce((acc, s) => acc * s.odds, 1);
-};
-```
-
-### 4. Système d'Apprentissage IA
-
-Nouvelle Edge Function pour analyser les résultats et ajuster les prévisions :
-
-```typescript
-// supabase/functions/learn-from-results/index.ts
-
-interface LearningMetrics {
-  // Par type de marché
-  marketPerformance: Map<string, { wins: number; total: number; roi: number }>;
-  
-  // Par équipe
-  teamPerformance: Map<string, { wins: number; total: number; accuracy: number }>;
-  
-  // Par joueur
-  playerPerformance: Map<string, { goals: number; predictions: number; hitRate: number }>;
-  
-  // Facteurs contextuels
-  b2bImpact: { withB2B: number; withoutB2B: number };
-  pimImpact: { highPIM: number; lowPIM: number };
-}
-
-// Calcul des ajustements de confiance
-const calculateConfidenceBoosts = (metrics: LearningMetrics): ConfidenceBoosts => {
-  return {
-    // Si les paris B2B ont +15% de succès, augmenter le boost B2B
-    b2bBoost: metrics.b2bImpact.withB2B > 0.65 ? 20 : 15,
-    
-    // Ajuster par équipe selon performance historique
-    teamBoosts: calculateTeamBoosts(metrics.teamPerformance),
-    
-    // Ajuster par joueur selon taux de réussite
-    playerBoosts: calculatePlayerBoosts(metrics.playerPerformance),
-  };
-};
-```
-
-### 5. Intégration du Learning dans betting-strategy
-
-Modifier l'Edge Function pour utiliser les métriques d'apprentissage :
-
-```typescript
-// betting-strategy/index.ts - Ajout
-
-// Récupérer les métriques d'apprentissage
-const { data: learningData } = await supabase
-  .from('prediction_history')
-  .select('*')
-  .eq('outcome_win', true)
-  .gte('prediction_date', thirtyDaysAgo);
-
-// Calculer les ajustements
-const winRateByMarket = calculateWinRateByMarket(learningData);
-const winRateByTeam = calculateWinRateByTeam(learningData);
-
-// Appliquer les ajustements au score de confiance
-const adjustedConfidence = (baseConfidence: number, context: BetContext): number => {
-  let adjusted = baseConfidence;
-  
-  // Bonus/malus selon performance historique du marché
-  if (winRateByMarket[context.marketType] > 0.6) {
-    adjusted += 5;
-  } else if (winRateByMarket[context.marketType] < 0.4) {
-    adjusted -= 10;
-  }
-  
-  // Bonus/malus selon performance historique de l'équipe
-  if (winRateByTeam[context.team] > 0.7) {
-    adjusted += 10;
-  }
-  
-  return Math.min(95, Math.max(30, adjusted));
-};
-```
-
-### 6. Nouveau LearningPanel Amélioré
-
-Afficher les métriques d'apprentissage :
-
-```typescript
-// LearningPanel.tsx - Nouvelle version
-
-interface LearningPanelProps {
-  stats: PredictionStats;
-  learningMetrics: {
-    byMarket: { type: string; winRate: number; count: number }[];
-    byTeam: { team: string; winRate: number; count: number }[];
-    trends: { period: string; roi: number }[];
-  };
-}
-
-// Sections à afficher
-// 1. Performance globale (Win Rate, ROI)
-// 2. Performance par type de marché (H2H, Buteur, Points)
-// 3. Performance par équipe (Top 5 / Bottom 5)
-// 4. Tendances récentes (7j, 14j, 30j)
-// 5. Indicateur de confiance IA (s'améliore-t-elle ?)
-```
-
-### 7. Nouvelle Table pour l'Apprentissage
-
-Migration pour stocker les métriques d'apprentissage :
-
-```sql
--- Nouvelle table pour les métriques d'apprentissage
-CREATE TABLE learning_metrics (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  metric_type TEXT NOT NULL, -- 'market', 'team', 'player', 'context'
-  metric_key TEXT NOT NULL,  -- 'h2h', 'TOR', 'McDavid', 'b2b_opponent'
-  wins INTEGER DEFAULT 0,
-  total INTEGER DEFAULT 0,
-  roi DECIMAL(6,2) DEFAULT 0,
-  confidence_adjustment INTEGER DEFAULT 0,
-  last_updated TIMESTAMP WITH TIME ZONE DEFAULT now(),
-  UNIQUE(metric_type, metric_key)
-);
-
--- Index pour performance
-CREATE INDEX idx_learning_metrics_type ON learning_metrics(metric_type);
-```
-
-## Flux de Données
-
-```text
-┌─────────────────────────────────────────────────────────────────────┐
-│ 1. COLLECTE (sync-nhl-stats, sync-winamax-odds)                     │
-│    └─> player_stats, winamax_odds, team_meta                        │
-├─────────────────────────────────────────────────────────────────────┤
-│ 2. ANALYSE (betting-strategy)                                        │
-│    └─> Génère les paris avec learning_metrics comme contexte        │
-├─────────────────────────────────────────────────────────────────────┤
-│ 3. SÉLECTION (Frontend Piliers)                                      │
-│    └─> Utilisateur sélectionne paris + saisit cotes manuelles       │
-├─────────────────────────────────────────────────────────────────────┤
-│ 4. PLACEMENT (user_bets)                                             │
-│    └─> Paris placés avec source='ai_suggestion'                     │
-├─────────────────────────────────────────────────────────────────────┤
-│ 5. VALIDATION (validate-predictions)                                 │
-│    └─> Marque outcome='won'/'lost' selon résultats réels            │
-├─────────────────────────────────────────────────────────────────────┤
-│ 6. APPRENTISSAGE (learn-from-results)                                │
-│    └─> Calcule les ajustements et met à jour learning_metrics       │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-## Résumé des Modifications
-
-1. **Pilier ÉQUIPE** : 3 blocs (SAFE, FUN, SUPER COMBO) au lieu de 2
-2. **Pilier JOUEURS** : 3 blocs parallèles avec saisie manuelle des cotes
-3. **SUPER COMBO** : Nouveau type de pari combinant plusieurs sélections
-4. **Panier Stratégique** : Combine les meilleures options des deux piliers + DUO
-5. **Apprentissage IA** : Ajuste les confiances selon les résultats historiques
-6. **Learning Panel** : Affiche les métriques d'apprentissage détaillées
-
+1. L'utilisateur ouvre le Super Combo IA
+2. L'IA analyse les joueurs en forme + historique d'apprentissage
+3. 3 cartes s'affichent : SAFE, FUN, SUPER COMBO (joueurs uniquement)
+4. Chaque carte montre :
+   - Les joueurs sélectionnés avec cotes estimées
+   - Le type de système (2/3, 3/4, etc.)
+   - Le % de récupération (pour SAFE)
+   - Le gain potentiel min/max
+5. L'utilisateur clique sur "Placer" sur le combo choisi
+6. Après validation des résultats, l'IA apprend et améliore ses futures suggestions
