@@ -112,11 +112,11 @@ function extractTeamPim(boxscore: any, teamKey: 'homeTeam' | 'awayTeam'): number
 }
 
 // Helper to create a unique hash for deduplication
-function createGoalHash(gameDate: string, scorer: string, matchName: string, period: number, situation: string): string {
-  return `${gameDate}_${scorer}_${matchName}_${period}_${situation}`.toLowerCase().replace(/\s+/g, '_');
+function createGoalHash(gameDate: string, scorer: string, matchName: string, goalIndex: number): string {
+  return `${gameDate}_${scorer}_${matchName}_${goalIndex}`.toLowerCase().replace(/\s+/g, '_');
 }
 
-// Fetch boxscore for a single game
+// Fetch boxscore for a single game - using playerByGameStats for goals
 async function fetchGameBoxscore(gameId: string): Promise<GameData | null> {
   try {
     const boxscoreUrl = `https://api-web.nhle.com/v1/gamecenter/${gameId}/boxscore`;
@@ -128,6 +128,11 @@ async function fetchGameBoxscore(gameId: string): Promise<GameData | null> {
     }
 
     const boxscore = await response.json();
+    
+    // Only process finished games
+    if (boxscore.gameState !== 'FINAL' && boxscore.gameState !== 'OFF') {
+      return null;
+    }
     
     const homeAbbr = boxscore.homeTeam?.abbrev || '';
     const awayAbbr = boxscore.awayTeam?.abbrev || '';
@@ -143,56 +148,65 @@ async function fetchGameBoxscore(gameId: string): Promise<GameData | null> {
     
     console.log(`Game ${gameId} - PIM extracted: home=${homePim}, away=${awayPim}`);
 
-    // Extract goals from scoring summary
+    // Extract goals from playerByGameStats (since summary.scoring may be empty)
     const goals: GoalData[] = [];
-    const scoringSummary = boxscore.summary?.scoring || [];
     
-    for (const period of scoringSummary) {
-      const periodNumber = period.periodDescriptor?.number || 0;
+    // Process home team players
+    const homePlayerStats = boxscore.playerByGameStats?.homeTeam;
+    if (homePlayerStats) {
+      const allHomePlayers = [
+        ...(homePlayerStats.forwards || []),
+        ...(homePlayerStats.defense || [])
+      ];
       
-      for (const goal of period.goals || []) {
-        const scorerFirstName = goal.firstName?.default || '';
-        const scorerLastName = goal.lastName?.default || '';
-        const scorerName = `${scorerFirstName} ${scorerLastName}`.trim();
-        
-        // Determine which team scored based on teamAbbrev in the goal data
-        const scorerTeamAbbr = goal.teamAbbrev?.default || goal.teamAbbrev || '';
-        
-        // Determine situation (EV, PP, SH, EN)
-        let situation = 'EV';
-        if (goal.strength === 'pp') situation = 'PP';
-        else if (goal.strength === 'sh') situation = 'SH';
-        else if (goal.goalType === 'empty-net' || goal.goalType === 'en') situation = 'EN';
-
-        const assists = goal.assists || [];
-        let assist1: string | undefined;
-        let assist2: string | undefined;
-        
-        if (assists.length > 0 && assists[0]) {
-          const a1First = assists[0].firstName?.default || '';
-          const a1Last = assists[0].lastName?.default || '';
-          assist1 = `${a1First} ${a1Last}`.trim() || undefined;
+      for (const player of allHomePlayers) {
+        if (player.goals && player.goals > 0) {
+          const playerName = player.name?.default || '';
+          // For each goal, create an entry (we don't have period info from this source)
+          for (let i = 0; i < player.goals; i++) {
+            const situation = player.powerPlayGoals > i ? 'PP' : 'EV';
+            goals.push({
+              scorer: playerName,
+              scorerTeamAbbr: homeAbbr,
+              assist1: undefined, // Can't determine assists from playerByGameStats
+              assist2: undefined,
+              situation,
+              period: 0, // Unknown from this source
+              timeInPeriod: '00:00',
+            });
+          }
         }
-        
-        if (assists.length > 1 && assists[1]) {
-          const a2First = assists[1].firstName?.default || '';
-          const a2Last = assists[1].lastName?.default || '';
-          assist2 = `${a2First} ${a2Last}`.trim() || undefined;
-        }
-
-        const timeInPeriod = goal.timeInPeriod || '00:00';
-
-        goals.push({
-          scorer: scorerName,
-          scorerTeamAbbr,
-          assist1,
-          assist2,
-          situation,
-          period: periodNumber,
-          timeInPeriod,
-        });
       }
     }
+    
+    // Process away team players
+    const awayPlayerStats = boxscore.playerByGameStats?.awayTeam;
+    if (awayPlayerStats) {
+      const allAwayPlayers = [
+        ...(awayPlayerStats.forwards || []),
+        ...(awayPlayerStats.defense || [])
+      ];
+      
+      for (const player of allAwayPlayers) {
+        if (player.goals && player.goals > 0) {
+          const playerName = player.name?.default || '';
+          for (let i = 0; i < player.goals; i++) {
+            const situation = player.powerPlayGoals > i ? 'PP' : 'EV';
+            goals.push({
+              scorer: playerName,
+              scorerTeamAbbr: awayAbbr,
+              assist1: undefined,
+              assist2: undefined,
+              situation,
+              period: 0,
+              timeInPeriod: '00:00',
+            });
+          }
+        }
+      }
+    }
+    
+    console.log(`Game ${gameId} - Found ${goals.length} goals from player stats`);
 
     return {
       gameId,
@@ -344,18 +358,18 @@ serve(async (req) => {
     
     const seenGoals = new Set<string>();
 
+    let goalIndex = 0;
     for (const game of allGames) {
       for (const goal of game.goals) {
         // Skip if we don't have scorer info
         if (!goal.scorer || !goal.scorerTeamAbbr) continue;
         
-        // Create unique hash to prevent duplicates
+        // Create unique hash to prevent duplicates (using goalIndex for uniqueness)
         const goalHash = createGoalHash(
           game.gameDate, 
           goal.scorer, 
           game.matchName, 
-          goal.period, 
-          goal.situation
+          goalIndex++
         );
         
         if (seenGoals.has(goalHash)) continue;
