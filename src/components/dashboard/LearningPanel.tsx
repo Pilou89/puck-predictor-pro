@@ -60,43 +60,29 @@ export function LearningPanel({ stats }: LearningPanelProps) {
         {/* Recent Performance */}
         <div>
           <p className="text-sm text-muted-foreground mb-3">Performance Récente</p>
-          <div className="flex gap-1">
-            {/* Mock recent predictions - will be replaced with real data */}
-            {[true, true, false, true, true, false, true, true, true, false].map((win, i) => (
-              <div
-                key={i}
-                className={`w-6 h-6 rounded-md flex items-center justify-center text-xs font-bold ${
-                  win 
-                    ? 'bg-success/20 text-success border border-success/30' 
-                    : 'bg-destructive/20 text-destructive border border-destructive/30'
-                }`}
-              >
-                {win ? 'W' : 'L'}
-              </div>
-            ))}
-          </div>
+          {stats.totalPredictions === 0 ? (
+            <p className="text-sm text-muted-foreground italic">
+              Aucun pari enregistré pour le moment
+            </p>
+          ) : (
+            <div className="flex gap-1">
+              {/* À connecter aux vrais résultats récents */}
+            </div>
+          )}
         </div>
 
         {/* Accuracy by Market */}
         <div>
           <p className="text-sm text-muted-foreground mb-3">Précision par Marché</p>
-          <div className="space-y-2">
-            {[
-              { market: "Goal Scorer", accuracy: 68 },
-              { market: "Player Points", accuracy: 72 },
-              { market: "Match Winner", accuracy: 55 },
-            ].map((item) => (
-              <div key={item.market} className="flex items-center justify-between">
-                <span className="text-sm">{item.market}</span>
-                <div className="flex items-center gap-2">
-                  <Progress value={item.accuracy} className="w-20 h-1.5" />
-                  <span className="text-xs font-mono text-muted-foreground w-8">
-                    {item.accuracy}%
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
+          {stats.totalPredictions === 0 ? (
+            <p className="text-sm text-muted-foreground italic">
+              Données disponibles après les premiers paris
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {/* À calculer à partir des vraies données par type de marché */}
+            </div>
+          )}
         </div>
       </div>
     </Card>
