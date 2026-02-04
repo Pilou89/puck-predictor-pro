@@ -1,10 +1,12 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { useBankroll } from "@/hooks/useBankroll";
 import { TonightBetsPanel } from "./TonightBetsPanel";
+import { TeamBet } from "./TeamPillarPanel";
+import { PlayerBet } from "./PlayerPillarPanel";
 import { 
   ShoppingBasket, 
   Shield, 
@@ -22,38 +24,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-interface TeamBet {
-  id: string;
-  type: 'SAFE' | 'OUTSIDER';
-  selection: string;
-  match: string;
-  odds: number;
-  commenceTime: string;
-  reasoning: string;
-}
-
-interface PlayerAnalysis {
-  id: string;
-  name: string;
-  team: string;
-  match: string;
-  matchTime: string;
-  goalsLast5: number;
-  ppGoals: number;
-  duoPartner?: string;
-  confidence: number;
-  reasoning: string;
-  betType: 'GOAL_SCORER' | 'POINTS' | 'DUO';
-}
-
-interface PlayerBet {
-  id: string;
-  player: PlayerAnalysis;
-  manualOdds: number | null;
-  stake: number;
-  potentialGain: number;
-}
-
 interface StrategicBasketPanelProps {
   selectedTeamBets: TeamBet[];
   selectedPlayerBets: PlayerBet[];
@@ -68,7 +38,7 @@ const BASKET_CONFIG = {
     bgGradient: 'from-success/10 to-success/5',
     icon: Shield,
     stake: 2,
-    description: 'Confiance > 85%',
+    description: 'Haute confiance',
   },
   DUO: { 
     emoji: '👥', 
@@ -80,15 +50,38 @@ const BASKET_CONFIG = {
     description: 'Synergie buteur-assistant',
   },
   FUN: { 
-    emoji: '🎰', 
+    emoji: '🎲', 
     label: 'FUN', 
     color: 'bg-warning/20 text-warning border-warning/30',
     bgGradient: 'from-warning/10 to-warning/5',
     icon: Zap,
+    stake: 1,
+    description: 'Risque modéré',
+  },
+  SUPER_COMBO: { 
+    emoji: '🎰', 
+    label: 'SUPER COMBO', 
+    color: 'bg-accent/20 text-accent border-accent/30',
+    bgGradient: 'from-accent/10 to-accent/5',
+    icon: Sparkles,
     stake: 0.5,
-    description: 'Super combo grosse cote',
+    description: 'Grosse cote combinée',
   },
 };
+
+interface BasketBet {
+  id: string;
+  basketType: 'SAFE' | 'DUO' | 'FUN' | 'SUPER_COMBO';
+  source: 'team' | 'player';
+  selection: string;
+  match: string;
+  odds: number;
+  stake: number;
+  potentialGain: number;
+  confidence?: number;
+  betType: string;
+  reasoning: string;
+}
 
 export function StrategicBasketPanel({ 
   selectedTeamBets, 
@@ -102,15 +95,20 @@ export function StrategicBasketPanel({
   const today = new Date().toISOString().split('T')[0];
   const tonightBets = stats.betsHistory.filter(bet => bet.bet_date === today);
 
-  // Compose the evening basket from selections
-  const composedBasket = composeBasket(selectedTeamBets, selectedPlayerBets);
+  // Compose the evening basket from selections - memoized
+  const composedBasket = React.useMemo(() => 
+    composeBasket(selectedTeamBets, selectedPlayerBets),
+    [selectedTeamBets, selectedPlayerBets]
+  );
 
-  // Check for already placed bets
+  // Check for already placed bets - stable effect
+  const tonightBetsKey = tonightBets.map(t => t.id).join(',');
+  const composedBasketKey = composedBasket.map(b => b.id).join(',');
+  
   useEffect(() => {
     const alreadyPlaced = new Set<string>();
     
     tonightBets.forEach(tb => {
-      // Match by selection and match name
       composedBasket.forEach(bet => {
         if (tb.selection === bet.selection && tb.match_name === bet.match) {
           alreadyPlaced.add(bet.id);
@@ -119,9 +117,10 @@ export function StrategicBasketPanel({
     });
     
     setPlacedBetIds(alreadyPlaced);
-  }, [tonightBets, composedBasket]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tonightBetsKey, composedBasketKey]);
 
-  const handlePlaceBet = async (bet: typeof composedBasket[0]) => {
+  const handlePlaceBet = async (bet: BasketBet) => {
     if (placedBetIds.has(bet.id) || placingBetId === bet.id) return;
 
     setPlacingBetId(bet.id);
@@ -170,7 +169,7 @@ export function StrategicBasketPanel({
   const safeBet = composedBasket.find(b => b.basketType === 'SAFE');
   const isCovered = safeBet ? safeBet.potentialGain >= totalStake : false;
 
-  const renderBetBlock = (bet: typeof composedBasket[0] | undefined, type: 'SAFE' | 'DUO' | 'FUN') => {
+  const renderBetBlock = (bet: BasketBet | undefined, type: 'SAFE' | 'DUO' | 'FUN' | 'SUPER_COMBO') => {
     const config = BASKET_CONFIG[type];
     const Icon = config.icon;
     const isPlaced = bet ? placedBetIds.has(bet.id) : false;
@@ -278,9 +277,10 @@ export function StrategicBasketPanel({
             <Icon className="w-8 h-8 mx-auto mb-2 opacity-30" />
             <p className="text-sm">Sélectionnez depuis les piliers</p>
             <p className="text-xs opacity-70">
-              {type === 'SAFE' && 'Équipe cote 1.40-1.80 ou Joueur confiance >85%'}
+              {type === 'SAFE' && 'Équipe 1.40-1.80 ou Joueur confiance ≥85%'}
               {type === 'DUO' && 'Joueur avec duo performant'}
-              {type === 'FUN' && 'Outsider équipe ou buteur grosse cote'}
+              {type === 'FUN' && 'Équipe ou joueur cote 1.80-4.50'}
+              {type === 'SUPER_COMBO' && 'Équipe ou joueur cote ≥4.50'}
             </p>
           </div>
         )}
@@ -300,24 +300,33 @@ export function StrategicBasketPanel({
               <h3 className="font-semibold flex items-center gap-2">
                 Panier Stratégique du Soir
                 <Badge variant="outline" className="text-xs font-normal">
-                  {composedBasket.length}/3 paris
+                  {composedBasket.length}/4 paris
                 </Badge>
               </h3>
               <p className="text-xs text-muted-foreground">
-                SAFE • DUO • FUN — Combine équipes + joueurs
+                SAFE • DUO • FUN • SUPER COMBO — Équipes + Joueurs
               </p>
             </div>
           </div>
           {composedBasket.length > 0 && (
-            <Button 
-              onClick={handlePlaceAll}
-              disabled={composedBasket.every(b => placedBetIds.has(b.id)) || isUpdating}
-              size="sm"
-              className="gap-2"
-            >
-              <Check className="w-4 h-4" />
-              Placer tout le panier
-            </Button>
+            <div className="flex gap-2">
+              <Button 
+                onClick={onClearSelection}
+                size="sm"
+                variant="outline"
+              >
+                Vider
+              </Button>
+              <Button 
+                onClick={handlePlaceAll}
+                disabled={composedBasket.every(b => placedBetIds.has(b.id)) || isUpdating}
+                size="sm"
+                className="gap-2"
+              >
+                <Check className="w-4 h-4" />
+                Placer tout
+              </Button>
+            </div>
           )}
         </div>
 
@@ -367,11 +376,12 @@ export function StrategicBasketPanel({
           </div>
         )}
 
-        {/* 3 Blocks Grid */}
-        <div className="grid gap-4 md:grid-cols-3">
+        {/* 4 Blocks Grid */}
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           {renderBetBlock(composedBasket.find(b => b.basketType === 'SAFE'), 'SAFE')}
           {renderBetBlock(composedBasket.find(b => b.basketType === 'DUO'), 'DUO')}
           {renderBetBlock(composedBasket.find(b => b.basketType === 'FUN'), 'FUN')}
+          {renderBetBlock(composedBasket.find(b => b.basketType === 'SUPER_COMBO'), 'SUPER_COMBO')}
         </div>
 
         {/* Summary Stats */}
@@ -411,8 +421,8 @@ export function StrategicBasketPanel({
             <div className="flex items-start gap-2">
               <Sparkles className="w-4 h-4 text-primary mt-0.5" />
               <p className="text-sm italic">
-                Stratégie hybride : cotes H2H automatiques Winamax + analyse joueurs avec cotes manuelles.
-                Le bloc SAFE doit idéalement couvrir la mise totale des blocs DUO et FUN.
+                Stratégie hybride avec 4 blocs : SAFE couvre les pertes, DUO exploite les synergies,
+                FUN offre un risque modéré, et SUPER COMBO maximise les gains potentiels.
               </p>
             </div>
           </div>
@@ -426,44 +436,34 @@ export function StrategicBasketPanel({
 }
 
 // Compose basket from selected bets
-function composeBasket(teamBets: TeamBet[], playerBets: PlayerBet[]) {
-  const basket: Array<{
-    id: string;
-    basketType: 'SAFE' | 'DUO' | 'FUN';
-    source: 'team' | 'player';
-    selection: string;
-    match: string;
-    odds: number;
-    stake: number;
-    potentialGain: number;
-    confidence?: number;
-    betType: string;
-    reasoning: string;
-  }> = [];
+function composeBasket(teamBets: TeamBet[], playerBets: PlayerBet[]): BasketBet[] {
+  const basket: BasketBet[] = [];
 
   // Find best SAFE option
   const safeCandidates = [
     ...teamBets
       .filter(t => t.type === 'SAFE')
       .map(t => ({ 
-        ...t, 
+        id: t.id,
         source: 'team' as const, 
-        confidence: 80,
+        selection: t.selection,
+        match: t.match,
+        odds: t.odds,
+        confidence: t.confidence || 80,
         betType: 'H2H',
+        reasoning: t.reasoning,
       })),
     ...playerBets
-      .filter(p => p.manualOdds && p.player.confidence >= 85)
+      .filter(p => p.manualOdds && p.category === 'SAFE')
       .map(p => ({
         id: p.id,
-        type: 'SAFE' as const,
+        source: 'player' as const,
         selection: p.player.name,
         match: p.player.match,
         odds: p.manualOdds!,
-        commenceTime: p.player.matchTime,
-        reasoning: p.player.reasoning,
-        source: 'player' as const,
         confidence: p.player.confidence,
         betType: p.player.betType,
+        reasoning: p.player.reasoning,
       })),
   ].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
 
@@ -488,7 +488,7 @@ function composeBasket(teamBets: TeamBet[], playerBets: PlayerBet[]) {
   const duoCandidate = playerBets.find(p => p.player.duoPartner && p.manualOdds);
   if (duoCandidate && duoCandidate.manualOdds) {
     basket.push({
-      id: duoCandidate.id,
+      id: duoCandidate.id + '-duo',
       basketType: 'DUO',
       source: 'player',
       selection: `${duoCandidate.player.name} + ${duoCandidate.player.duoPartner}`,
@@ -502,25 +502,31 @@ function composeBasket(teamBets: TeamBet[], playerBets: PlayerBet[]) {
     });
   }
 
-  // Find FUN option (outsider team or high-odds player)
+  // Find FUN option (team or player with odds 1.80-4.50)
   const funCandidates = [
     ...teamBets
-      .filter(t => t.type === 'OUTSIDER')
+      .filter(t => t.type === 'FUN')
       .map(t => ({ 
-        ...t, 
+        id: t.id,
         source: 'team' as const, 
-        betType: 'H2H_OUTSIDER',
+        selection: t.selection,
+        match: t.match,
+        odds: t.odds,
+        confidence: t.confidence || 60,
+        betType: 'H2H',
+        reasoning: t.reasoning,
       })),
     ...playerBets
-      .filter(p => p.manualOdds && p.manualOdds >= 4.0 && !p.player.duoPartner)
+      .filter(p => p.manualOdds && p.category === 'FUN')
       .map(p => ({
         id: p.id,
+        source: 'player' as const,
         selection: p.player.name,
         match: p.player.match,
         odds: p.manualOdds!,
-        reasoning: `${p.player.goalsLast5} buts récents, grosse cote`,
-        source: 'player' as const,
-        betType: 'GOAL_SCORER',
+        confidence: p.player.confidence,
+        betType: p.player.betType,
+        reasoning: p.player.reasoning,
       })),
   ].sort((a, b) => b.odds - a.odds);
 
@@ -535,8 +541,54 @@ function composeBasket(teamBets: TeamBet[], playerBets: PlayerBet[]) {
       odds: fun.odds,
       stake: BASKET_CONFIG.FUN.stake,
       potentialGain: BASKET_CONFIG.FUN.stake * fun.odds,
+      confidence: fun.confidence,
       betType: fun.betType,
       reasoning: fun.reasoning,
+    });
+  }
+
+  // Find SUPER COMBO option (team or player with odds >= 4.50)
+  const superComboCandidates = [
+    ...teamBets
+      .filter(t => t.type === 'SUPER_COMBO')
+      .map(t => ({ 
+        id: t.id,
+        source: 'team' as const, 
+        selection: t.selection,
+        match: t.match,
+        odds: t.odds,
+        confidence: t.confidence || 40,
+        betType: 'H2H_OUTSIDER',
+        reasoning: t.reasoning,
+      })),
+    ...playerBets
+      .filter(p => p.manualOdds && p.category === 'SUPER_COMBO')
+      .map(p => ({
+        id: p.id,
+        source: 'player' as const,
+        selection: p.player.name,
+        match: p.player.match,
+        odds: p.manualOdds!,
+        confidence: p.player.confidence,
+        betType: p.player.betType,
+        reasoning: p.player.reasoning,
+      })),
+  ].sort((a, b) => b.odds - a.odds);
+
+  if (superComboCandidates[0]) {
+    const superCombo = superComboCandidates[0];
+    basket.push({
+      id: superCombo.id,
+      basketType: 'SUPER_COMBO',
+      source: superCombo.source,
+      selection: superCombo.selection,
+      match: superCombo.match,
+      odds: superCombo.odds,
+      stake: BASKET_CONFIG.SUPER_COMBO.stake,
+      potentialGain: BASKET_CONFIG.SUPER_COMBO.stake * superCombo.odds,
+      confidence: superCombo.confidence,
+      betType: superCombo.betType,
+      reasoning: superCombo.reasoning,
     });
   }
 

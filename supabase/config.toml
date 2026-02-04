@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.betting-strategy]
 verify_jwt = false
+
+[functions.learn-from-results]
+verify_jwt = false

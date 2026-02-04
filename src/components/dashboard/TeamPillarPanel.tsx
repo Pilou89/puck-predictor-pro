@@ -12,23 +12,26 @@ import {
   AlertCircle,
   TrendingUp,
   Check,
-  Loader2
+  Sparkles
 } from "lucide-react";
 import { toast } from "sonner";
 
-interface TeamBet {
+export interface TeamBet {
   id: string;
-  type: 'SAFE' | 'OUTSIDER';
+  type: 'SAFE' | 'FUN' | 'SUPER_COMBO';
   selection: string;
   match: string;
   odds: number;
   commenceTime: string;
   reasoning: string;
+  confidence?: number;
+  learningBoost?: number;
 }
 
 interface TeamPillarData {
   safeBets: TeamBet[];
-  outsiderBet: TeamBet | null;
+  funBets: TeamBet[];
+  superComboBets: TeamBet[];
   timestamp: string;
 }
 
@@ -41,12 +44,32 @@ export function TeamPillarPanel({ onBetSelect, selectedBets = new Set() }: TeamP
   const [data, setData] = useState<TeamPillarData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [learningBoosts, setLearningBoosts] = useState<Map<string, number>>(new Map());
+
+  const fetchLearningMetrics = async () => {
+    try {
+      const { data: metrics } = await supabase
+        .from('learning_metrics')
+        .select('*')
+        .eq('metric_type', 'team');
+      
+      const boosts = new Map<string, number>();
+      metrics?.forEach(m => {
+        boosts.set(m.metric_key, m.confidence_adjustment);
+      });
+      setLearningBoosts(boosts);
+    } catch (err) {
+      console.log('No learning metrics yet');
+    }
+  };
 
   const fetchTeamOpportunities = async () => {
     setIsLoading(true);
     setError(null);
 
     try {
+      await fetchLearningMetrics();
+
       // Fetch H2H odds from Winamax FR
       const { data: h2hOdds, error: oddsError } = await supabase
         .from('winamax_odds')
@@ -66,87 +89,76 @@ export function TeamPillarPanel({ onBetSelect, selectedBets = new Set() }: TeamP
 
       const teamMetaMap = new Map(teamMeta?.map(t => [t.team_abbr, t]) || []);
 
-      // Process SAFE bets (1.40 - 1.80)
-      const safeCandidates = (h2hOdds || [])
-        .filter(o => o.price >= 1.40 && o.price <= 1.80)
-        .map(o => {
-          // Extract team abbreviation from selection
-          const selectionTeam = extractTeamAbbr(o.selection);
-          const meta = teamMetaMap.get(selectionTeam);
-          
-          // Check opponent discipline
-          const opponentAbbr = getOpponentAbbr(o.match_name, selectionTeam);
-          const opponentMeta = teamMetaMap.get(opponentAbbr);
-          
-          let score = 0;
-          const reasons: string[] = [];
-          
-          // B2B advantage
-          if (opponentMeta?.is_b2b) {
-            score += 15;
-            reasons.push("Adversaire en B2B 🔋");
-          }
-          
-          // Discipline advantage (opponent has high PIM)
-          if (opponentMeta?.pim_per_game && opponentMeta.pim_per_game >= 8.0) {
-            score += 10;
-            reasons.push(`Adv. indiscipliné (${opponentMeta.pim_per_game.toFixed(1)} PIM/G)`);
-          }
-          
-          // Low odds = higher implied probability
+      // Process all bets with learning adjustments
+      const processedBets = (h2hOdds || []).map(o => {
+        const selectionTeam = extractTeamAbbr(o.selection);
+        const opponentAbbr = getOpponentAbbr(o.match_name, selectionTeam);
+        const opponentMeta = teamMetaMap.get(opponentAbbr);
+        const teamBoost = learningBoosts.get(selectionTeam) || 0;
+        
+        let score = 50 + teamBoost;
+        const reasons: string[] = [];
+        
+        // B2B advantage
+        if (opponentMeta?.is_b2b) {
+          score += 15;
+          reasons.push("Adversaire en B2B 🔋");
+        }
+        
+        // Discipline advantage
+        if (opponentMeta?.pim_per_game && opponentMeta.pim_per_game >= 8.0) {
+          score += 10;
+          reasons.push(`Adv. indiscipliné (${opponentMeta.pim_per_game.toFixed(1)} PIM/G)`);
+        }
+        
+        // Odds-based scoring
+        if (o.price <= 1.80) {
           score += Math.round((1.80 - o.price) * 20);
-          
-          return {
-            id: o.id,
-            type: 'SAFE' as const,
-            selection: o.selection,
-            match: o.match_name,
-            odds: o.price,
-            commenceTime: o.commence_time,
-            reasoning: reasons.length > 0 ? reasons.join(' • ') : `Favori solide @${o.price.toFixed(2)}`,
-            score,
-          };
-        })
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 2);
+        }
+        
+        // Learning boost indicator
+        if (teamBoost > 0) {
+          reasons.push(`📈 +${teamBoost}% IA learning`);
+        } else if (teamBoost < 0) {
+          reasons.push(`📉 ${teamBoost}% IA learning`);
+        }
+        
+        return {
+          id: o.id,
+          selection: o.selection,
+          match: o.match_name,
+          odds: o.price,
+          commenceTime: o.commence_time,
+          reasoning: reasons.length > 0 ? reasons.join(' • ') : `Cote @${o.price.toFixed(2)}`,
+          score,
+          confidence: Math.min(95, Math.max(30, score)),
+          learningBoost: teamBoost,
+        };
+      });
 
-      // Process OUTSIDER bet (> 3.50)
-      const outsiderCandidates = (h2hOdds || [])
-        .filter(o => o.price >= 3.50)
-        .map(o => {
-          const selectionTeam = extractTeamAbbr(o.selection);
-          const opponentAbbr = getOpponentAbbr(o.match_name, selectionTeam);
-          const opponentMeta = teamMetaMap.get(opponentAbbr);
-          
-          let score = 0;
-          const reasons: string[] = [];
-          
-          // If favorite is B2B, outsider has a chance
-          if (opponentMeta?.is_b2b) {
-            score += 20;
-            reasons.push("Favori en B2B 🔋");
-          }
-          
-          // Higher odds = higher potential
-          score += Math.round((o.price - 3.50) * 5);
-          reasons.push(`Grosse cote @${o.price.toFixed(2)}`);
-          
-          return {
-            id: o.id,
-            type: 'OUTSIDER' as const,
-            selection: o.selection,
-            match: o.match_name,
-            odds: o.price,
-            commenceTime: o.commence_time,
-            reasoning: reasons.join(' • '),
-            score,
-          };
-        })
-        .sort((a, b) => b.score - a.score);
+      // Categorize by odds
+      const safeBets: TeamBet[] = processedBets
+        .filter(o => o.odds >= 1.40 && o.odds <= 1.80)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 2)
+        .map(b => ({ ...b, type: 'SAFE' as const }));
+
+      const funBets: TeamBet[] = processedBets
+        .filter(o => o.odds > 1.80 && o.odds < 4.50)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 2)
+        .map(b => ({ ...b, type: 'FUN' as const }));
+
+      const superComboBets: TeamBet[] = processedBets
+        .filter(o => o.odds >= 4.50)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 2)
+        .map(b => ({ ...b, type: 'SUPER_COMBO' as const }));
 
       setData({
-        safeBets: safeCandidates,
-        outsiderBet: outsiderCandidates[0] || null,
+        safeBets,
+        funBets,
+        superComboBets,
         timestamp: new Date().toISOString(),
       });
 
@@ -191,10 +203,17 @@ export function TeamPillarPanel({ onBetSelect, selectedBets = new Set() }: TeamP
               <Icon className="w-4 h-4" />
             </div>
             <div>
-              <Badge variant="outline" className="text-xs mb-1">
-                {bet.type === 'SAFE' ? 'Safe' : 'Outsider'}
-              </Badge>
-              <p className="font-semibold">{bet.selection}</p>
+              <div className="flex items-center gap-1">
+                <Badge variant="outline" className="text-xs">
+                  {bet.type === 'SAFE' ? 'Safe' : bet.type === 'FUN' ? 'Fun' : 'Super Combo'}
+                </Badge>
+                {bet.learningBoost !== 0 && bet.learningBoost !== undefined && (
+                  <Badge className={`text-xs ${bet.learningBoost > 0 ? 'bg-success/20 text-success' : 'bg-destructive/20 text-destructive'}`}>
+                    {bet.learningBoost > 0 ? '+' : ''}{bet.learningBoost}%
+                  </Badge>
+                )}
+              </div>
+              <p className="font-semibold mt-1">{bet.selection}</p>
             </div>
           </div>
           <div className="text-right">
@@ -218,6 +237,32 @@ export function TeamPillarPanel({ onBetSelect, selectedBets = new Set() }: TeamP
     );
   };
 
+  const renderSection = (
+    title: string, 
+    emoji: string,
+    bets: TeamBet[], 
+    icon: React.ElementType, 
+    colorClass: string,
+    oddsRange: string
+  ) => (
+    <div className="mb-4">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-lg">{emoji}</span>
+        <span className="text-sm font-medium">{title}</span>
+        <Badge variant="outline" className="text-xs">{oddsRange}</Badge>
+      </div>
+      <div className="space-y-3">
+        {bets.length > 0 ? (
+          bets.map(bet => renderBetCard(bet, icon, colorClass))
+        ) : (
+          <p className="text-sm text-muted-foreground text-center py-4">
+            Aucune cote {title} disponible
+          </p>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <Card className="glass-card p-6">
       <div className="flex items-center justify-between mb-6">
@@ -233,7 +278,7 @@ export function TeamPillarPanel({ onBetSelect, selectedBets = new Set() }: TeamP
               </Badge>
             </h3>
             <p className="text-xs text-muted-foreground">
-              Cotes H2H Winamax FR • Victoires d'équipe
+              Cotes H2H Winamax FR • SAFE / FUN / SUPER COMBO
             </p>
           </div>
         </div>
@@ -266,37 +311,14 @@ export function TeamPillarPanel({ onBetSelect, selectedBets = new Set() }: TeamP
 
       {data && !isLoading && (
         <div className="space-y-4">
-          {/* SAFE Section */}
-          <div>
-            <div className="flex items-center gap-2 mb-3">
-              <Shield className="w-4 h-4 text-success" />
-              <span className="text-sm font-medium">Safe (1.40 - 1.80)</span>
-              <Badge variant="outline" className="text-xs">2 max</Badge>
-            </div>
-            <div className="space-y-3">
-              {data.safeBets.length > 0 ? (
-                data.safeBets.map(bet => renderBetCard(bet, Shield, 'bg-success/20 text-success'))
-              ) : (
-                <p className="text-sm text-muted-foreground text-center py-4">
-                  Aucune cote Safe disponible (1.40-1.80)
-                </p>
-              )}
-            </div>
+          {renderSection('SAFE', '🛡️', data.safeBets, Shield, 'bg-success/20 text-success', '1.40 - 1.80')}
+          
+          <div className="border-t border-border/50 pt-4">
+            {renderSection('FUN', '🎲', data.funBets, Zap, 'bg-warning/20 text-warning', '1.80 - 4.50')}
           </div>
-
-          {/* OUTSIDER Section */}
-          <div className="pt-4 border-t border-border/50">
-            <div className="flex items-center gap-2 mb-3">
-              <Zap className="w-4 h-4 text-warning" />
-              <span className="text-sm font-medium">Outsider FUN (≥3.50)</span>
-            </div>
-            {data.outsiderBet ? (
-              renderBetCard(data.outsiderBet, Zap, 'bg-warning/20 text-warning')
-            ) : (
-              <p className="text-sm text-muted-foreground text-center py-4">
-                Aucun outsider intéressant ce soir
-              </p>
-            )}
+          
+          <div className="border-t border-border/50 pt-4">
+            {renderSection('SUPER COMBO', '🎰', data.superComboBets, Sparkles, 'bg-primary/20 text-primary', '≥ 4.50')}
           </div>
 
           <p className="text-xs text-muted-foreground text-center pt-2">
@@ -310,7 +332,6 @@ export function TeamPillarPanel({ onBetSelect, selectedBets = new Set() }: TeamP
 
 // Helper functions
 function extractTeamAbbr(selection: string): string {
-  // Try to match known team names
   const teamMappings: Record<string, string> = {
     'maple leafs': 'TOR', 'toronto': 'TOR',
     'canadiens': 'MTL', 'montreal': 'MTL',
@@ -355,7 +376,6 @@ function extractTeamAbbr(selection: string): string {
 }
 
 function getOpponentAbbr(matchName: string, teamAbbr: string): string {
-  // Match format: "Team A vs Team B" or "Team A @ Team B"
   const parts = matchName.split(/\s+(?:vs|@|at)\s+/i);
   if (parts.length !== 2) return 'UNK';
   

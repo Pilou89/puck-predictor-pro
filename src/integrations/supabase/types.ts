@@ -71,6 +71,42 @@ export type Database = {
         }
         Relationships: []
       }
+      learning_metrics: {
+        Row: {
+          confidence_adjustment: number | null
+          created_at: string | null
+          id: string
+          last_updated: string | null
+          metric_key: string
+          metric_type: string
+          roi: number | null
+          total: number | null
+          wins: number | null
+        }
+        Insert: {
+          confidence_adjustment?: number | null
+          created_at?: string | null
+          id?: string
+          last_updated?: string | null
+          metric_key: string
+          metric_type: string
+          roi?: number | null
+          total?: number | null
+          wins?: number | null
+        }
+        Update: {
+          confidence_adjustment?: number | null
+          created_at?: string | null
+          id?: string
+          last_updated?: string | null
+          metric_key?: string
+          metric_type?: string
+          roi?: number | null
+          total?: number | null
+          wins?: number | null
+        }
+        Relationships: []
+      }
       player_stats: {
         Row: {
           assist1: string | null
