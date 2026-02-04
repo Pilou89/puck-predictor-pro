@@ -41,6 +41,13 @@ interface PredictionStats {
   roi: number;
 }
 
+interface CronJob {
+  name: string;
+  schedule: string;
+  lastRun: string | null;
+  isActive: boolean;
+}
+
 interface TopMatch {
   id: string;
   startTime: string;
@@ -69,6 +76,9 @@ interface GamesResponse {
   topMatches: TopMatch[];
   hotPlayers: HotPlayer[];
   stats: PredictionStats;
+  cronJobs?: CronJob[];
+  lastStatsSync?: string;
+  lastOddsSync?: string;
 }
 
 export function useNHLData() {
@@ -153,6 +163,9 @@ export function useNHLData() {
       winRate: 0,
       roi: 0,
     },
+    cronJobs: gamesQuery.data?.cronJobs || [],
+    lastStatsSync: gamesQuery.data?.lastStatsSync ? new Date(gamesQuery.data.lastStatsSync) : null,
+    lastOddsSync: gamesQuery.data?.lastOddsSync ? new Date(gamesQuery.data.lastOddsSync) : null,
     lastSync: gamesQuery.data?.timestamp ? new Date(gamesQuery.data.timestamp) : null,
     
     // Loading states

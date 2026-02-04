@@ -274,13 +274,36 @@ serve(async (req) => {
       roi = ((returns - totalStakes) / totalStakes) * 100;
     }
 
+    // Fetch cron jobs status and last sync times
+    const { data: cronConfig } = await supabase
+      .from('cron_config')
+      .select('job_name, schedule_time, last_run_at, is_active');
+
+    const cronJobs = (cronConfig || []).map(job => ({
+      name: job.job_name,
+      schedule: job.schedule_time,
+      lastRun: job.last_run_at,
+      isActive: job.is_active,
+    }));
+
+    // Get last sync times from cron_config
+    const statsJob = cronConfig?.find(j => j.job_name === 'sync_nhl_stats');
+    const oddsJob = cronConfig?.find(j => j.job_name === 'sync_winamax_odds');
+    
+    // Also check winamax_odds table for last fetched time
+    const { data: lastOddsData } = await supabase
+      .from('winamax_odds')
+      .select('fetched_at')
+      .order('fetched_at', { ascending: false })
+      .limit(1);
+
     return new Response(
       JSON.stringify({
         success: true,
         timestamp: now.toISOString(),
         timezone: 'Europe/Paris',
         games,
-        topMatches, // Top 3 matches for night analysis
+        topMatches,
         hotPlayers: hotPlayersWithOdds,
         stats: {
           totalPredictions,
@@ -289,6 +312,9 @@ serve(async (req) => {
           winRate: totalPredictions > 0 ? wins / totalPredictions : 0,
           roi: parseFloat(roi.toFixed(1)),
         },
+        cronJobs,
+        lastStatsSync: statsJob?.last_run_at || null,
+        lastOddsSync: lastOddsData?.[0]?.fetched_at || oddsJob?.last_run_at || null,
       }),
       { 
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
