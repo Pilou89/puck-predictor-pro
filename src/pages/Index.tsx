@@ -159,7 +159,7 @@ const Index = () => {
   const displayMatches = localMatches.length > 0 ? localMatches : mockMatches;
   const displayBadges = Object.keys(localBadges).length > 0 ? localBadges : mockMatchBadges;
   const displayHotPlayers = formattedHotPlayers.length > 0 ? formattedHotPlayers : mockHotPlayers;
-  const displayStats = stats.totalPredictions > 0 ? predictionStats : mockPredictionStats;
+  const displayStats = predictionStats; // Toujours les vraies stats, pas de mock
   const displayAlerts = valueAlerts.length > 0 ? valueAlerts : mockValueAlerts;
   const displayAnalyzedMatches = analyzedMatches.length > 0 ? analyzedMatches : mockAnalyzedMatches;
   
