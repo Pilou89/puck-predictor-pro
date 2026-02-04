@@ -255,6 +255,7 @@ const Index = () => {
                   lastStatsSync={lastStatsSync}
                   lastOddsSync={lastOddsSync}
                   isLoading={isRefreshing}
+                  onSyncComplete={refresh}
                 />
               </div>
             </div>
