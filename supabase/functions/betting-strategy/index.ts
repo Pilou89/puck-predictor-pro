@@ -6,44 +6,58 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
-// Bet types configuration
-const BET_TYPES = {
-  H2H: { name: 'Victoire Finale', description: 'Incluant prolongation et TAB' },
-  GOAL_SCORER: { name: 'Buteur Simple', description: 'Mise sur un joueur spécifique' },
-  DUO: { name: 'Duo Buteur/Points', description: 'Combiné buteur + assistant' },
-  POINTS_SOLO: { name: 'Points Solo', description: 'Over/Under points joueur' },
+// Basket bet types configuration
+const BASKET_TYPES = {
+  SAFE: { 
+    name: 'SAFE', 
+    emoji: '🛡️',
+    description: 'Pari simple à haute confiance', 
+    minConfidence: 85,
+    allowedTypes: ['H2H', 'POINTS_SOLO'],
+    stake: 2.00,
+  },
+  DUO: { 
+    name: 'DUO', 
+    emoji: '👥',
+    description: 'Pari basé sur les duos performants', 
+    minOdds: 3.00,
+    maxOdds: 5.00,
+    allowedTypes: ['DUO', 'GOAL_SCORER'],
+    stake: 1.00,
+  },
+  FUN: { 
+    name: 'FUN', 
+    emoji: '🎰',
+    description: 'Pari à grosse cote pour le fun',
+    minOdds: 4.00,
+    allowedTypes: ['GOAL_SCORER', 'DUO'],
+    stake: 0.50,
+  },
 };
 
-// Stake levels
-const STAKES = {
-  LOTO: { amount: 0.50, label: '🎰 Loto', minOdds: 4.0 },
-  MEDIUM: { amount: 1.00, label: '⚖️ Équilibré', minOdds: 2.0, maxOdds: 4.0 },
-  SECURITY: { amount: 2.00, label: '🛡️ Sécurité', maxOdds: 2.0 },
-  SUPER_COMBO: { amount: 3.00, label: '💎 Super Combo', minConfidence: 85 },
-};
-
-interface BetProposal {
+interface BasketBet {
   id: string;
-  type: keyof typeof BET_TYPES;
+  basketType: 'SAFE' | 'DUO' | 'FUN';
+  type: string;
   selection: string;
   match: string;
   odds: number;
   confidence: number;
   stake: number;
-  stakeLabel: string;
   potentialGain: number;
   netGain: number;
   reasoning: string;
-  coverageLevel?: string;
-  coveredBy?: string;
 }
 
-interface StrategyPlan {
+interface EveningBasket {
   timestamp: string;
   totalStake: number;
   totalPotentialGain: number;
-  coverageRatio: number;
-  bets: BetProposal[];
+  isCovered: boolean;
+  coverageDetails: string;
+  safe: BasketBet | null;
+  duo: BasketBet | null;
+  fun: BasketBet | null;
   summary: string;
 }
 
@@ -62,7 +76,7 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    console.log('Starting betting strategy analysis...');
+    console.log('Starting evening basket generation...');
 
     const parisTime = new Date().toLocaleString('en-US', { timeZone: 'Europe/Paris' });
     const now = new Date(parisTime);
@@ -90,7 +104,7 @@ serve(async (req) => {
       .select('*')
       .gte('game_date', fiveDaysAgo);
 
-    // Fetch season stats for historical data
+    // Fetch season stats for duo data
     const { data: seasonStats } = await supabase
       .from('player_stats')
       .select('scorer, team_abbr, match_name, duo')
@@ -128,7 +142,7 @@ serve(async (req) => {
       if (p) p.games = games.size;
     }
 
-    // Build duo stats
+    // Build duo stats from season data
     const duoStats = new Map<string, { count: number; players: string[] }>();
     for (const stat of seasonStats || []) {
       if (stat.duo) {
@@ -140,18 +154,7 @@ serve(async (req) => {
       }
     }
 
-    // Historical goals against opponents
-    const historicalGoals = new Map<string, Map<string, number>>();
-    for (const stat of seasonStats || []) {
-      const playerKey = stat.scorer.toLowerCase();
-      const matchParts = stat.match_name.split(/\s+vs\s+|\s+@\s+/i);
-      const opponent = matchParts.find((t: string) => t !== stat.team_abbr) || '';
-      if (!historicalGoals.has(playerKey)) historicalGoals.set(playerKey, new Map());
-      const h = historicalGoals.get(playerKey)!;
-      h.set(opponent, (h.get(opponent) || 0) + 1);
-    }
-
-    // Build AI prompt with all data
+    // Build data for AI prompt
     const topGoalScorers = goalScorerOdds
       .filter(o => o.price >= 1.70)
       .slice(0, 20)
@@ -161,7 +164,6 @@ serve(async (req) => {
         const playerTeam = perf?.team || matchParts[0];
         const opponent = matchParts.find((t: string) => t !== playerTeam) || matchParts[1];
         const opponentMeta = teamMetaMap.get(opponent);
-        const history = historicalGoals.get(o.selection.toLowerCase())?.get(opponent) || 0;
         
         return {
           player: o.selection,
@@ -173,12 +175,11 @@ serve(async (req) => {
           duo: perf?.duo,
           opponentB2B: opponentMeta?.is_b2b || false,
           opponentPIM: opponentMeta?.pim_per_game || 0,
-          historyVsOpponent: history,
         };
       });
 
     const topH2H = h2hOdds
-      .filter(o => o.price >= 1.30 && o.price <= 3.50)
+      .filter(o => o.price >= 1.30 && o.price <= 2.50)
       .slice(0, 10)
       .map(o => {
         const matchParts = o.match_name.split(/\s+vs\s+|\s+@\s+/i);
@@ -192,7 +193,6 @@ serve(async (req) => {
           match: o.match_name,
           odds: o.price,
           opponentB2B: opponentMeta?.is_b2b || false,
-          opponentPIM: opponentMeta?.pim_per_game || 0,
           teamB2B: teamData?.is_b2b || false,
         };
       });
@@ -200,88 +200,96 @@ serve(async (req) => {
     const topDuos = Array.from(duoStats.entries())
       .filter(([_, d]) => d.count >= 2)
       .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, 5)
+      .slice(0, 10)
       .map(([duo, data]) => ({ duo, connections: data.count, players: data.players }));
 
-    const strategyPrompt = `Tu es un expert en stratégie de paris NHL. Génère un PLAN DE MISE STRATÉGIQUE pour ce soir.
+    // Build prompt for AI
+    const basketPrompt = `Tu es un expert en stratégie de paris NHL. Génère LE PANIER DU SOIR avec exactement 3 paris distincts.
 
 ## DONNÉES DISPONIBLES
 
-### Cotes Buteurs (filtrées ≥1.70):
-${topGoalScorers.map(p => 
-  `- ${p.player}: @${p.odds.toFixed(2)} | ${p.goals5}G en ${p.games5}M (${(p.goals5/p.games5).toFixed(2)}/M) | PP:${p.ppGoals}${p.opponentB2B ? ' 🔋B2B' : ''}${p.opponentPIM > 8 ? ` 🔴PIM:${p.opponentPIM.toFixed(1)}` : ''}${p.historyVsOpponent > 0 ? ` ⚡${p.historyVsOpponent}G vs adversaire` : ''}${p.duo ? ` | Duo:${p.duo}` : ''}`
-).join('\n')}
-
-### Cotes H2H (victoire finale):
+### Cotes Victoire (H2H) pour le bloc SAFE:
 ${topH2H.map(h => 
-  `- ${h.selection} @${h.odds.toFixed(2)} (${h.match})${h.opponentB2B ? ' 🔋Adv. en B2B' : ''}${h.teamB2B ? ' ⚠️En B2B' : ''}`
+  `- ${h.selection} @${h.odds.toFixed(2)} (${h.match})${h.opponentB2B ? ' 🔋Adv. B2B' : ''}${h.teamB2B ? ' ⚠️En B2B' : ''}`
 ).join('\n')}
 
-### Duos Performants (saison):
-${topDuos.map(d => `- ${d.duo}: ${d.connections} connexions`).join('\n')}
+### Buteurs pour les blocs DUO et FUN:
+${topGoalScorers.map(p => 
+  `- ${p.player}: @${p.odds.toFixed(2)} | ${p.goals5}G en ${p.games5}M${p.opponentB2B ? ' 🔋B2B' : ''}${p.duo ? ` | Duo:${p.duo}` : ''}`
+).join('\n')}
 
-## RÈGLES STRICTES DE STRATÉGIE
+### Duos Performants (depuis le début de saison):
+${topDuos.map(d => `- ${d.duo}: ${d.connections} connexions cette saison`).join('\n')}
 
-### Types de Paris Autorisés:
-1. **H2H**: Victoire finale (prolongation/TAB inclus)
-2. **GOAL_SCORER**: Buteur simple
-3. **DUO**: Combiné buteur + assistant
-4. **POINTS_SOLO**: Over/Under points joueur
+## RÈGLES STRICTES DU PANIER
 
-### Logique de Mise (CRITIQUE):
-- **LOTO** (🎰): Cote ≥4.00, mise 0.50€
-- **ÉQUILIBRÉ** (⚖️): Cote 2.00-3.99, mise 1.00€
-- **SÉCURITÉ** (🛡️): Cote <2.00, mise 2.00€
-- **SUPER COMBO** (💎): UNIQUEMENT si confiance >85%, mise 3.00€
+### BLOC SAFE (🛡️ Sécurité):
+- Type autorisé: H2H (victoire) ou POINTS_SOLO
+- Confiance OBLIGATOIRE > 85%
+- Mise fixe: 2.00€
+- Critères de sélection: équipe favorite, adversaire en B2B, ou équipe avec momentum
 
-### Règle de Couverture OBLIGATOIRE:
-Pour chaque pari LOTO, tu DOIS proposer un pari SÉCURITÉ dont le gain potentiel couvre la perte du LOTO.
-Exemple: LOTO 0.50€ perdu → SÉCURITÉ doit rapporter minimum +0.50€ net.
+### BLOC DUO (👥 Duo):
+- Type: DUO ou GOAL_SCORER d'un joueur membre d'un duo performant
+- Cote OBLIGATOIRE entre 3.00 et 5.00
+- Mise fixe: 1.00€
+- Doit s'appuyer sur les duos listés ci-dessus
+
+### BLOC FUN (🎰 Loto):
+- Type: GOAL_SCORER avec grosse cote ou pari risqué
+- Cote minimum: 4.00
+- Mise fixe: 0.50€
+- Rechercher les opportunités (B2B adversaire, joueur en forme)
+
+### CALCUL DE COUVERTURE CRITIQUE:
+Le gain net potentiel du SAFE doit couvrir la perte des mises DUO + FUN.
+Formule: (SAFE.odds × 2.00) - 2.00 >= 1.00 + 0.50
+Donc SAFE.odds >= 1.75 minimum pour couvrir les pertes.
 
 ### Calcul du Score de Confiance:
 - Base: 50%
-- +15% si adversaire en B2B
-- +10% si >0.6 but/match
-- +10% si adversaire >8 PIM/G
-- +5% si duo performant
-- +5% si historique positif vs adversaire
+- +20% si adversaire en B2B
+- +10% si >0.6 but/match sur 5 derniers
+- +10% si duo performant (>3 connexions)
 - -10% si équipe en B2B
 - Max: 95%
 
-## FORMAT DE RÉPONSE JSON
+## FORMAT DE RÉPONSE JSON STRICT
 
 {
-  "bets": [
-    {
-      "id": "bet-1",
-      "type": "GOAL_SCORER",
-      "selection": "Nom Joueur",
-      "match": "TOR vs MTL",
-      "odds": 2.50,
-      "confidence": 75,
-      "stake": 1.00,
-      "stakeLabel": "⚖️ Équilibré",
-      "reasoning": "Explication courte incluant les facteurs clés",
-      "coveredBy": "bet-2"
-    },
-    {
-      "id": "bet-2",
-      "type": "H2H",
-      "selection": "TOR",
-      "match": "TOR vs MTL",
-      "odds": 1.65,
-      "confidence": 70,
-      "stake": 2.00,
-      "stakeLabel": "🛡️ Sécurité",
-      "reasoning": "Pari de couverture pour bet-1"
-    }
-  ],
-  "summary": "Résumé de la stratégie de la nuit en 2-3 phrases"
+  "safe": {
+    "id": "safe-1",
+    "type": "H2H",
+    "selection": "Nom Équipe",
+    "match": "TOR vs MTL",
+    "odds": 1.85,
+    "confidence": 88,
+    "reasoning": "Explication courte"
+  },
+  "duo": {
+    "id": "duo-1",
+    "type": "GOAL_SCORER",
+    "selection": "Nom Joueur",
+    "match": "TOR vs MTL",
+    "odds": 3.50,
+    "confidence": 65,
+    "reasoning": "Membre du duo X+Y (N connexions)"
+  },
+  "fun": {
+    "id": "fun-1",
+    "type": "GOAL_SCORER",
+    "selection": "Nom Joueur",
+    "match": "TOR vs MTL",
+    "odds": 5.00,
+    "confidence": 45,
+    "reasoning": "Opportunité loto: adversaire en B2B"
+  },
+  "summary": "Résumé du panier en 1-2 phrases"
 }
 
-Génère entre 4 et 8 paris avec une stratégie équilibrée. Assure-toi que chaque LOTO a sa SÉCURITÉ.`;
+Génère exactement 3 paris. Si les données ne permettent pas un bloc, mets null.`;
 
-    console.log('Calling Lovable AI for strategy...');
+    console.log('Calling Lovable AI for basket...');
 
     const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
       method: 'POST',
@@ -292,8 +300,8 @@ Génère entre 4 et 8 paris avec une stratégie équilibrée. Assure-toi que cha
       body: JSON.stringify({
         model: 'google/gemini-3-flash-preview',
         messages: [
-          { role: 'system', content: 'Tu es un stratège expert en paris sportifs NHL. Tu réponds UNIQUEMENT en JSON valide.' },
-          { role: 'user', content: strategyPrompt }
+          { role: 'system', content: 'Tu es un stratège expert en paris sportifs NHL. Tu réponds UNIQUEMENT en JSON valide sans markdown.' },
+          { role: 'user', content: basketPrompt }
         ],
         temperature: 0.3,
       }),
@@ -314,52 +322,76 @@ Génère entre 4 et 8 paris avec une stratégie équilibrée. Assure-toi que cha
     const aiData = await aiResponse.json();
     const aiContent = aiData.choices?.[0]?.message?.content;
 
-    console.log('AI Strategy received');
+    console.log('AI Basket received');
 
     // Parse AI response
-    let strategyResult;
+    let basketResult;
     try {
       let jsonStr = aiContent;
       const jsonMatch = aiContent.match(/```json\s*([\s\S]*?)\s*```/);
       if (jsonMatch) jsonStr = jsonMatch[1];
-      strategyResult = JSON.parse(jsonStr);
+      // Also try to extract from code blocks without json specifier
+      const codeMatch = jsonStr.match(/```\s*([\s\S]*?)\s*```/);
+      if (codeMatch) jsonStr = codeMatch[1];
+      // Clean up any remaining markdown
+      jsonStr = jsonStr.replace(/```/g, '').trim();
+      basketResult = JSON.parse(jsonStr);
     } catch (parseError) {
-      console.error('Failed to parse AI response:', parseError);
-      strategyResult = { bets: [], summary: "Erreur d'analyse. Données insuffisantes." };
+      console.error('Failed to parse AI response:', parseError, 'Content:', aiContent);
+      basketResult = { safe: null, duo: null, fun: null, summary: "Erreur d'analyse. Données insuffisantes." };
     }
 
-    // Calculate totals and coverage
-    const bets: BetProposal[] = (strategyResult.bets || []).map((bet: any) => {
-      const potentialGain = bet.stake * bet.odds;
-      const netGain = potentialGain - bet.stake;
+    // Build the basket with calculated values
+    const buildBet = (bet: any, basketType: 'SAFE' | 'DUO' | 'FUN'): BasketBet | null => {
+      if (!bet) return null;
+      const config = BASKET_TYPES[basketType];
+      const potentialGain = config.stake * bet.odds;
+      const netGain = potentialGain - config.stake;
       return {
-        ...bet,
+        id: bet.id || `${basketType.toLowerCase()}-1`,
+        basketType,
+        type: bet.type,
+        selection: bet.selection,
+        match: bet.match,
+        odds: bet.odds,
+        confidence: bet.confidence,
+        stake: config.stake,
         potentialGain: parseFloat(potentialGain.toFixed(2)),
         netGain: parseFloat(netGain.toFixed(2)),
+        reasoning: bet.reasoning,
       };
-    });
+    };
 
-    const totalStake = bets.reduce((sum, b) => sum + b.stake, 0);
-    const totalPotentialGain = bets.reduce((sum, b) => sum + b.potentialGain, 0);
-    
-    // Calculate coverage ratio (security bets gains vs loto losses)
-    const lotoBets = bets.filter(b => b.stakeLabel?.includes('Loto'));
-    const securityBets = bets.filter(b => b.stakeLabel?.includes('Sécurité'));
-    const lotoRisk = lotoBets.reduce((sum, b) => sum + b.stake, 0);
-    const securityGain = securityBets.reduce((sum, b) => sum + b.netGain, 0);
-    const coverageRatio = lotoRisk > 0 ? (securityGain / lotoRisk) * 100 : 100;
+    const safe = buildBet(basketResult.safe, 'SAFE');
+    const duo = buildBet(basketResult.duo, 'DUO');
+    const fun = buildBet(basketResult.fun, 'FUN');
 
-    const plan: StrategyPlan = {
+    // Calculate totals
+    const totalStake = (safe?.stake || 0) + (duo?.stake || 0) + (fun?.stake || 0);
+    const totalPotentialGain = (safe?.potentialGain || 0) + (duo?.potentialGain || 0) + (fun?.potentialGain || 0);
+
+    // Coverage calculation: SAFE net gain must cover DUO + FUN stakes
+    const safeNetGain = safe?.netGain || 0;
+    const riskStake = (duo?.stake || 0) + (fun?.stake || 0);
+    const isCovered = safeNetGain >= riskStake;
+    const coverageDetails = isCovered 
+      ? `Le gain SAFE (+${safeNetGain.toFixed(2)}€) couvre les mises à risque (${riskStake.toFixed(2)}€)`
+      : `Attention: gain SAFE (+${safeNetGain.toFixed(2)}€) < mises à risque (${riskStake.toFixed(2)}€)`;
+
+    const basket: EveningBasket = {
       timestamp: now.toISOString(),
       totalStake: parseFloat(totalStake.toFixed(2)),
       totalPotentialGain: parseFloat(totalPotentialGain.toFixed(2)),
-      coverageRatio: parseFloat(coverageRatio.toFixed(0)),
-      bets,
-      summary: strategyResult.summary || "Plan de mise généré avec succès.",
+      isCovered,
+      coverageDetails,
+      safe,
+      duo,
+      fun,
+      summary: basketResult.summary || "Panier du soir généré avec succès.",
     };
 
     return new Response(
-      JSON.stringify({ success: true, plan }),
+      JSON.stringify({ success: true, basket }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
     );
 

@@ -16,45 +16,78 @@ import {
   TrendingUp,
   DollarSign,
   Coins,
-  Link2,
   Check,
-  Loader2
+  Loader2,
+  Users,
+  Zap,
+  ShoppingBasket,
+  CheckCircle2,
+  XCircle
 } from "lucide-react";
 import { toast } from "sonner";
 
-interface BetProposal {
+interface BasketBet {
   id: string;
+  basketType: 'SAFE' | 'DUO' | 'FUN';
   type: string;
   selection: string;
   match: string;
   odds: number;
   confidence: number;
   stake: number;
-  stakeLabel: string;
   potentialGain: number;
   netGain: number;
   reasoning: string;
-  coveredBy?: string;
 }
 
-interface StrategyPlan {
+interface EveningBasket {
   timestamp: string;
   totalStake: number;
   totalPotentialGain: number;
-  coverageRatio: number;
-  bets: BetProposal[];
+  isCovered: boolean;
+  coverageDetails: string;
+  safe: BasketBet | null;
+  duo: BasketBet | null;
+  fun: BasketBet | null;
   summary: string;
 }
 
-const BET_TYPE_LABELS: Record<string, { label: string; icon: string }> = {
-  H2H: { label: 'Victoire', icon: '🏆' },
-  GOAL_SCORER: { label: 'Buteur', icon: '⚽' },
-  DUO: { label: 'Duo', icon: '👥' },
-  POINTS_SOLO: { label: 'Points', icon: '📊' },
+const BASKET_CONFIG = {
+  SAFE: { 
+    emoji: '🛡️', 
+    label: 'SAFE', 
+    color: 'bg-success/20 text-success border-success/30',
+    bgGradient: 'from-success/10 to-success/5',
+    icon: Shield,
+    description: 'Haute confiance (>85%)',
+  },
+  DUO: { 
+    emoji: '👥', 
+    label: 'DUO', 
+    color: 'bg-primary/20 text-primary border-primary/30',
+    bgGradient: 'from-primary/10 to-primary/5',
+    icon: Users,
+    description: 'Basé sur les duos (3.00-5.00)',
+  },
+  FUN: { 
+    emoji: '🎰', 
+    label: 'FUN', 
+    color: 'bg-warning/20 text-warning border-warning/30',
+    bgGradient: 'from-warning/10 to-warning/5',
+    icon: Zap,
+    description: 'Grosse cote (≥4.00)',
+  },
+};
+
+const BET_TYPE_LABELS: Record<string, string> = {
+  H2H: 'Victoire',
+  GOAL_SCORER: 'Buteur',
+  DUO: 'Duo',
+  POINTS_SOLO: 'Points',
 };
 
 export function StrategicBettingPanel() {
-  const [plan, setPlan] = useState<StrategyPlan | null>(null);
+  const [basket, setBasket] = useState<EveningBasket | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [placingBetId, setPlacingBetId] = useState<string | null>(null);
@@ -62,16 +95,15 @@ export function StrategicBettingPanel() {
   
   const { stats, addBet, isUpdating } = useBankroll();
 
-  // Get today's bets from bankroll stats
   const today = new Date().toISOString().split('T')[0];
   const tonightBets = stats.betsHistory.filter(bet => bet.bet_date === today);
 
-  // Check which bets are already placed (on component mount and when bets change)
+  // Check which bets are already placed
   useEffect(() => {
-    if (plan && tonightBets.length > 0) {
+    if (basket && tonightBets.length > 0) {
       const alreadyPlaced = new Set<string>();
-      for (const bet of plan.bets) {
-        // Check if this bet already exists in tonight's bets
+      const bets = [basket.safe, basket.duo, basket.fun].filter(Boolean) as BasketBet[];
+      for (const bet of bets) {
         const exists = tonightBets.some(tb => 
           tb.selection === bet.selection && 
           tb.match_name === bet.match &&
@@ -83,9 +115,9 @@ export function StrategicBettingPanel() {
       }
       setPlacedBetIds(alreadyPlaced);
     }
-  }, [plan, tonightBets]);
+  }, [basket, tonightBets]);
 
-  const generateStrategy = async () => {
+  const generateBasket = async () => {
     setIsLoading(true);
     setError(null);
 
@@ -93,12 +125,12 @@ export function StrategicBettingPanel() {
       const { data, error: invokeError } = await supabase.functions.invoke('betting-strategy');
 
       if (invokeError) throw invokeError;
-      if (!data.success) throw new Error(data.error || 'Strategy generation failed');
+      if (!data.success) throw new Error(data.error || 'Basket generation failed');
 
-      setPlan(data.plan);
-      toast.success('Plan de mise stratégique généré !');
+      setBasket(data.basket);
+      toast.success('Panier du soir généré ! 🛒');
     } catch (err) {
-      console.error('Strategy error:', err);
+      console.error('Basket error:', err);
       const message = err instanceof Error ? err.message : 'Erreur inconnue';
       setError(message);
       toast.error(`Erreur: ${message}`);
@@ -107,13 +139,12 @@ export function StrategicBettingPanel() {
     }
   };
 
-  const handlePlaceBet = async (bet: BetProposal) => {
+  const handlePlaceBet = async (bet: BasketBet) => {
     if (placedBetIds.has(bet.id) || placingBetId === bet.id) return;
 
     setPlacingBetId(bet.id);
 
     try {
-      // Add bet to user_bets table
       addBet({
         bet_date: today,
         match_name: bet.match,
@@ -125,17 +156,15 @@ export function StrategicBettingPanel() {
         outcome: 'pending',
         actual_gain: 0,
         source: 'ai_suggestion',
-        notes: bet.reasoning,
+        notes: `[${bet.basketType}] ${bet.reasoning}`,
       });
 
-      // Mark as placed locally
       setPlacedBetIds(prev => new Set([...prev, bet.id]));
       
       toast.success(
         <div className="flex flex-col gap-1">
-          <span className="font-semibold">Pari placé ! 🎯</span>
+          <span className="font-semibold">Pari {bet.basketType} placé ! 🎯</span>
           <span className="text-sm opacity-80">{bet.selection}</span>
-          <span className="text-xs opacity-60">Mise: {bet.stake.toFixed(2)}€ → Gain: +{bet.netGain.toFixed(2)}€</span>
         </div>
       );
     } catch (err) {
@@ -146,24 +175,125 @@ export function StrategicBettingPanel() {
     }
   };
 
-  const getStakeColor = (label: string) => {
-    if (label.includes('Loto')) return 'bg-purple-500/20 text-purple-400 border-purple-500/30';
-    if (label.includes('Sécurité')) return 'bg-green-500/20 text-green-400 border-green-500/30';
-    if (label.includes('Super')) return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
-    return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
-  };
-
-  const getConfidenceColor = (confidence: number) => {
-    if (confidence >= 80) return 'text-success';
-    if (confidence >= 65) return 'text-warning';
-    return 'text-muted-foreground';
-  };
-
   const formatTime = (timestamp: string) => {
     return new Date(timestamp).toLocaleTimeString('fr-FR', { 
       hour: '2-digit', 
       minute: '2-digit' 
     });
+  };
+
+  const renderBasketBlock = (bet: BasketBet | null, type: 'SAFE' | 'DUO' | 'FUN') => {
+    const config = BASKET_CONFIG[type];
+    const Icon = config.icon;
+    const isPlaced = bet ? placedBetIds.has(bet.id) : false;
+    const isPlacing = bet ? placingBetId === bet.id : false;
+
+    return (
+      <div 
+        className={`relative p-4 rounded-xl border-2 transition-all ${
+          isPlaced 
+            ? 'border-primary/50 ring-2 ring-primary/20' 
+            : 'border-border/50 hover:border-primary/30'
+        } bg-gradient-to-br ${config.bgGradient}`}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">{config.emoji}</span>
+            <div>
+              <Badge className={`${config.color} border font-bold`}>
+                {config.label}
+              </Badge>
+              <p className="text-xs text-muted-foreground mt-0.5">{config.description}</p>
+            </div>
+          </div>
+          {bet && (
+            <div className="text-right">
+              <p className="text-xs text-muted-foreground">Mise fixe</p>
+              <p className="font-mono font-bold">{bet.stake.toFixed(2)}€</p>
+            </div>
+          )}
+        </div>
+
+        {/* Content */}
+        {bet ? (
+          <div className="space-y-3">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <Badge variant="outline" className="text-xs">
+                  {BET_TYPE_LABELS[bet.type] || bet.type}
+                </Badge>
+                {isPlaced && (
+                  <Badge className="bg-primary/20 text-primary border-primary/30 border text-xs">
+                    <Check className="w-3 h-3 mr-1" />
+                    En cours
+                  </Badge>
+                )}
+              </div>
+              <p className="font-semibold text-lg">{bet.selection}</p>
+              <p className="text-sm text-muted-foreground">{bet.match}</p>
+            </div>
+
+            <div className="flex items-center gap-4 text-sm">
+              <div className="flex items-center gap-1">
+                <TrendingUp className="w-4 h-4 text-primary" />
+                <span className="font-mono font-bold">@{bet.odds.toFixed(2)}</span>
+              </div>
+              <div className="flex items-center gap-1 text-success">
+                <DollarSign className="w-4 h-4" />
+                <span className="font-mono font-bold">+{bet.netGain.toFixed(2)}€</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className={`text-sm font-medium ${
+                  bet.confidence >= 80 ? 'text-success' : 
+                  bet.confidence >= 60 ? 'text-warning' : 'text-muted-foreground'
+                }`}>
+                  {bet.confidence}%
+                </span>
+                <Progress value={bet.confidence} className="w-12 h-1.5" />
+              </div>
+            </div>
+
+            <p className="text-sm text-muted-foreground italic">{bet.reasoning}</p>
+
+            <Button
+              onClick={() => handlePlaceBet(bet)}
+              disabled={isPlaced || isPlacing || isUpdating}
+              size="sm"
+              variant={isPlaced ? "outline" : "default"}
+              className={`w-full ${
+                isPlaced 
+                  ? 'bg-primary/10 border-primary/30 text-primary cursor-default' 
+                  : ''
+              }`}
+            >
+              {isPlacing ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Placement...
+                </>
+              ) : isPlaced ? (
+                <>
+                  <Check className="w-4 h-4 mr-2" />
+                  Pari placé
+                </>
+              ) : (
+                <>
+                  <Target className="w-4 h-4 mr-2" />
+                  Placer ce pari
+                </>
+              )}
+            </Button>
+          </div>
+        ) : (
+          <div className="text-center py-6 text-muted-foreground">
+            <Icon className="w-8 h-8 mx-auto mb-2 opacity-30" />
+            <p className="text-sm">Aucune opportunité trouvée</p>
+            <p className="text-xs opacity-70">Données insuffisantes</p>
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
@@ -172,35 +302,35 @@ export function StrategicBettingPanel() {
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-lg bg-gradient-to-br from-success/20 to-primary/20">
-              <Target className="w-6 h-6 text-success" />
+              <ShoppingBasket className="w-6 h-6 text-success" />
             </div>
             <div>
               <h3 className="font-semibold flex items-center gap-2">
-                Plan de Mise Stratégique
-                <Shield className="w-4 h-4 text-success" />
+                Le Panier du Soir
+                <Badge variant="outline" className="text-xs font-normal">3 blocs</Badge>
               </h3>
               <p className="text-xs text-muted-foreground">
-                Stratégie de couverture optimisée par IA
+                SAFE • DUO • FUN — Stratégie de couverture
               </p>
             </div>
           </div>
           <Button 
-            onClick={generateStrategy} 
+            onClick={generateBasket} 
             disabled={isLoading}
             size="sm"
             className="gap-2"
           >
             <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-            {isLoading ? 'Génération...' : 'Générer le Plan'}
+            {isLoading ? 'Génération...' : 'Générer le Panier'}
           </Button>
         </div>
 
         {/* Loading State */}
         {isLoading && (
-          <div className="space-y-4">
-            <Skeleton className="h-20 w-full" />
-            <Skeleton className="h-32 w-full" />
-            <Skeleton className="h-32 w-full" />
+          <div className="grid gap-4 md:grid-cols-3">
+            <Skeleton className="h-64 w-full" />
+            <Skeleton className="h-64 w-full" />
+            <Skeleton className="h-64 w-full" />
           </div>
         )}
 
@@ -213,21 +343,55 @@ export function StrategicBettingPanel() {
         )}
 
         {/* Empty State */}
-        {!plan && !isLoading && !error && (
+        {!basket && !isLoading && !error && (
           <div className="text-center py-8">
-            <Target className="w-12 h-12 mx-auto text-muted-foreground/50 mb-3" />
+            <ShoppingBasket className="w-12 h-12 mx-auto text-muted-foreground/50 mb-3" />
             <p className="text-muted-foreground">
-              Cliquez sur "Générer le Plan" pour obtenir la feuille de route
+              Cliquez sur "Générer le Panier" pour le plan de la nuit
             </p>
             <p className="text-xs text-muted-foreground/70 mt-1">
-              L'IA génère automatiquement le plan à 18h chaque jour
+              L'IA compose 3 paris: SAFE, DUO et FUN avec couverture
             </p>
           </div>
         )}
 
-        {/* Strategy Plan */}
-        {plan && !isLoading && (
+        {/* Evening Basket */}
+        {basket && !isLoading && (
           <div className="space-y-6">
+            {/* Coverage Banner */}
+            <div className={`p-4 rounded-lg flex items-center gap-3 ${
+              basket.isCovered 
+                ? 'bg-success/10 border border-success/30' 
+                : 'bg-warning/10 border border-warning/30'
+            }`}>
+              {basket.isCovered ? (
+                <CheckCircle2 className="w-5 h-5 text-success" />
+              ) : (
+                <XCircle className="w-5 h-5 text-warning" />
+              )}
+              <div className="flex-1">
+                <p className={`text-sm font-medium ${
+                  basket.isCovered ? 'text-success' : 'text-warning'
+                }`}>
+                  {basket.isCovered ? 'Panier Couvert ✓' : 'Couverture Partielle'}
+                </p>
+                <p className="text-xs text-muted-foreground">{basket.coverageDetails}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-xs text-muted-foreground">Gain potentiel total</p>
+                <p className="font-mono font-bold text-success">
+                  +{(basket.totalPotentialGain - basket.totalStake).toFixed(2)}€
+                </p>
+              </div>
+            </div>
+
+            {/* 3 Blocks Grid */}
+            <div className="grid gap-4 md:grid-cols-3">
+              {renderBasketBlock(basket.safe, 'SAFE')}
+              {renderBasketBlock(basket.duo, 'DUO')}
+              {renderBasketBlock(basket.fun, 'FUN')}
+            </div>
+
             {/* Summary Stats */}
             <div className="grid grid-cols-3 gap-4">
               <div className="p-3 rounded-lg bg-secondary/50 text-center">
@@ -235,7 +399,7 @@ export function StrategicBettingPanel() {
                   <Coins className="w-4 h-4" />
                   <span className="text-xs">Mise Totale</span>
                 </div>
-                <p className="font-mono font-bold text-lg">{plan.totalStake.toFixed(2)}€</p>
+                <p className="font-mono font-bold text-lg">{basket.totalStake.toFixed(2)}€</p>
               </div>
               <div className="p-3 rounded-lg bg-secondary/50 text-center">
                 <div className="flex items-center justify-center gap-1 text-muted-foreground mb-1">
@@ -243,18 +407,16 @@ export function StrategicBettingPanel() {
                   <span className="text-xs">Gain Potentiel</span>
                 </div>
                 <p className="font-mono font-bold text-lg text-success">
-                  {plan.totalPotentialGain.toFixed(2)}€
+                  {basket.totalPotentialGain.toFixed(2)}€
                 </p>
               </div>
               <div className="p-3 rounded-lg bg-secondary/50 text-center">
                 <div className="flex items-center justify-center gap-1 text-muted-foreground mb-1">
-                  <Shield className="w-4 h-4" />
-                  <span className="text-xs">Couverture</span>
+                  <TrendingUp className="w-4 h-4" />
+                  <span className="text-xs">ROI Potentiel</span>
                 </div>
-                <p className={`font-mono font-bold text-lg ${
-                  plan.coverageRatio >= 100 ? 'text-success' : 'text-warning'
-                }`}>
-                  {plan.coverageRatio}%
+                <p className="font-mono font-bold text-lg text-primary">
+                  +{(((basket.totalPotentialGain / basket.totalStake) - 1) * 100).toFixed(0)}%
                 </p>
               </div>
             </div>
@@ -263,122 +425,13 @@ export function StrategicBettingPanel() {
             <div className="p-4 rounded-lg bg-primary/5 border border-primary/20">
               <div className="flex items-start gap-2">
                 <Sparkles className="w-4 h-4 text-primary mt-0.5" />
-                <p className="text-sm italic">{plan.summary}</p>
+                <p className="text-sm italic">{basket.summary}</p>
               </div>
-            </div>
-
-            {/* Bets List */}
-            <div className="space-y-3">
-              {plan.bets.map((bet, index) => {
-                const typeInfo = BET_TYPE_LABELS[bet.type] || { label: bet.type, icon: '📌' };
-                const linkedBet = bet.coveredBy 
-                  ? plan.bets.find(b => b.id === bet.coveredBy) 
-                  : null;
-                const isPlaced = placedBetIds.has(bet.id);
-                const isPlacing = placingBetId === bet.id;
-
-                return (
-                  <div 
-                    key={bet.id}
-                    className={`p-4 rounded-lg border transition-all ${
-                      isPlaced 
-                        ? 'bg-primary/5 border-primary/50 ring-2 ring-primary/20' 
-                        : 'bg-card border-border/50 hover:border-primary/30'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg">{typeInfo.icon}</span>
-                        <Badge variant="outline" className="text-xs">
-                          {typeInfo.label}
-                        </Badge>
-                        <Badge className={`${getStakeColor(bet.stakeLabel)} border text-xs`}>
-                          {bet.stakeLabel}
-                        </Badge>
-                        {isPlaced && (
-                          <Badge className="bg-primary/20 text-primary border-primary/30 border text-xs">
-                            <Check className="w-3 h-3 mr-1" />
-                            En cours
-                          </Badge>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className={`text-sm font-medium ${getConfidenceColor(bet.confidence)}`}>
-                          {bet.confidence}%
-                        </span>
-                        <Progress 
-                          value={bet.confidence} 
-                          className="w-16 h-1.5" 
-                        />
-                      </div>
-                    </div>
-
-                    <div className="mb-2">
-                      <p className="font-semibold">{bet.selection}</p>
-                      <p className="text-sm text-muted-foreground">{bet.match}</p>
-                    </div>
-
-                    <div className="flex items-center gap-4 mb-3 text-sm">
-                      <div className="flex items-center gap-1">
-                        <TrendingUp className="w-4 h-4 text-primary" />
-                        <span className="font-mono font-bold">@{bet.odds.toFixed(2)}</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <Coins className="w-4 h-4 text-muted-foreground" />
-                        <span className="font-mono">{bet.stake.toFixed(2)}€</span>
-                      </div>
-                      <div className="flex items-center gap-1 text-success">
-                        <DollarSign className="w-4 h-4" />
-                        <span className="font-mono font-bold">+{bet.netGain.toFixed(2)}€</span>
-                      </div>
-                    </div>
-
-                    <p className="text-sm text-muted-foreground mb-3">{bet.reasoning}</p>
-
-                    {bet.coveredBy && (
-                      <div className="mb-3 flex items-center gap-1 text-xs text-muted-foreground">
-                        <Link2 className="w-3 h-3" />
-                        <span>Couvert par: {linkedBet?.selection || bet.coveredBy}</span>
-                      </div>
-                    )}
-
-                    {/* Place Bet Button */}
-                    <Button
-                      onClick={() => handlePlaceBet(bet)}
-                      disabled={isPlaced || isPlacing || isUpdating}
-                      size="sm"
-                      variant={isPlaced ? "outline" : "default"}
-                      className={`w-full ${
-                        isPlaced 
-                          ? 'bg-primary/10 border-primary/30 text-primary cursor-default' 
-                          : 'bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70'
-                      }`}
-                    >
-                      {isPlacing ? (
-                        <>
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                          Placement en cours...
-                        </>
-                      ) : isPlaced ? (
-                        <>
-                          <Check className="w-4 h-4 mr-2" />
-                          Pari placé
-                        </>
-                      ) : (
-                        <>
-                          <Target className="w-4 h-4 mr-2" />
-                          Placer ce pari
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                );
-              })}
             </div>
 
             {/* Timestamp */}
             <p className="text-xs text-muted-foreground text-center">
-              Plan généré à {formatTime(plan.timestamp)}
+              Panier généré à {formatTime(basket.timestamp)}
             </p>
           </div>
         )}
