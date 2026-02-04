@@ -14,14 +14,13 @@ import {
   AlertCircle,
   TrendingUp,
   Check,
-  Loader2,
   Zap,
   Target,
-  DollarSign
+  Shield
 } from "lucide-react";
 import { toast } from "sonner";
 
-interface PlayerAnalysis {
+export interface PlayerAnalysis {
   id: string;
   name: string;
   team: string;
@@ -33,14 +32,17 @@ interface PlayerAnalysis {
   confidence: number;
   reasoning: string;
   betType: 'GOAL_SCORER' | 'POINTS' | 'DUO';
+  category: 'SAFE' | 'FUN' | 'SUPER_COMBO';
+  learningBoost?: number;
 }
 
-interface PlayerBet {
+export interface PlayerBet {
   id: string;
   player: PlayerAnalysis;
   manualOdds: number | null;
   stake: number;
   potentialGain: number;
+  category: 'SAFE' | 'FUN' | 'SUPER_COMBO';
 }
 
 interface PlayerPillarPanelProps {
@@ -59,13 +61,32 @@ export function PlayerPillarPanel({
   const [isLoading, setIsLoading] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [learningBoosts, setLearningBoosts] = useState<Map<string, number>>(new Map());
+
+  const fetchLearningMetrics = async () => {
+    try {
+      const { data: metrics } = await supabase
+        .from('learning_metrics')
+        .select('*')
+        .eq('metric_type', 'player');
+      
+      const boosts = new Map<string, number>();
+      metrics?.forEach(m => {
+        boosts.set(m.metric_key.toLowerCase(), m.confidence_adjustment);
+      });
+      setLearningBoosts(boosts);
+    } catch (err) {
+      console.log('No player learning metrics yet');
+    }
+  };
 
   const fetchPlayerAnalysis = async () => {
     setIsLoading(true);
     setError(null);
 
     try {
-      // Fetch hot players from stats (goals in last 5 games)
+      await fetchLearningMetrics();
+
       const fiveDaysAgo = new Date();
       fiveDaysAgo.setDate(fiveDaysAgo.getDate() - 14);
 
@@ -77,14 +98,12 @@ export function PlayerPillarPanel({
 
       if (goalsError) throw goalsError;
 
-      // Fetch team metadata for context
       const { data: teamMeta, error: metaError } = await supabase
         .from('team_meta')
         .select('*');
 
       if (metaError) throw metaError;
 
-      // Fetch tonight's games for matching
       const { data: tonightOdds, error: oddsError } = await supabase
         .from('winamax_odds')
         .select('*')
@@ -95,7 +114,6 @@ export function PlayerPillarPanel({
 
       if (oddsError) throw oddsError;
 
-      // Extract tonight's team abbreviations
       const tonightTeams = new Set<string>();
       const tonightMatches: Record<string, { match: string; time: string }> = {};
       
@@ -109,7 +127,6 @@ export function PlayerPillarPanel({
 
       const teamMetaMap = new Map(teamMeta?.map(t => [t.team_abbr, t]) || []);
 
-      // Aggregate player stats
       const playerStatsMap = new Map<string, {
         goals: number;
         ppGoals: number;
@@ -135,7 +152,6 @@ export function PlayerPillarPanel({
         playerStatsMap.set(key, existing);
       });
 
-      // Filter to players playing tonight and score them
       const analyzedPlayers: PlayerAnalysis[] = [];
       
       playerStatsMap.forEach((stats, playerName) => {
@@ -144,14 +160,14 @@ export function PlayerPillarPanel({
         const matchInfo = tonightMatches[stats.team];
         if (!matchInfo) return;
 
-        // Get opponent info
         const opponentAbbr = getOpponentAbbr(matchInfo.match, stats.team);
         const opponentMeta = teamMetaMap.get(opponentAbbr);
+        const playerBoost = learningBoosts.get(playerName.toLowerCase()) || 0;
 
-        let confidence = 50;
+        let confidence = 50 + playerBoost;
         const reasons: string[] = [];
 
-        // Goals in recent games
+        // Goals scoring
         if (stats.goals >= 4) {
           confidence += 25;
           reasons.push(`🔥 ${stats.goals} buts récents`);
@@ -175,6 +191,13 @@ export function PlayerPillarPanel({
           reasons.push("Adversaire en B2B 🔋");
         }
 
+        // Learning boost
+        if (playerBoost > 0) {
+          reasons.push(`📈 +${playerBoost}% IA`);
+        } else if (playerBoost < 0) {
+          reasons.push(`📉 ${playerBoost}% IA`);
+        }
+
         // Duo synergy
         let betType: 'GOAL_SCORER' | 'POINTS' | 'DUO' = 'GOAL_SCORER';
         if (stats.duo) {
@@ -183,8 +206,17 @@ export function PlayerPillarPanel({
           betType = 'DUO';
         }
 
-        // Cap confidence
         confidence = Math.min(confidence, 95);
+
+        // Categorize by confidence
+        let category: 'SAFE' | 'FUN' | 'SUPER_COMBO' = 'FUN';
+        if (confidence >= 85) {
+          category = 'SAFE';
+        } else if (confidence >= 70) {
+          category = 'FUN';
+        } else {
+          category = 'SUPER_COMBO';
+        }
 
         analyzedPlayers.push({
           id: `player-${playerName.replace(/\s+/g, '-').toLowerCase()}`,
@@ -198,12 +230,13 @@ export function PlayerPillarPanel({
           confidence,
           reasoning: reasons.join(' • ') || 'Joueur actif',
           betType,
+          category,
+          learningBoost: playerBoost,
         });
       });
 
-      // Sort by confidence and take top 3
       analyzedPlayers.sort((a, b) => b.confidence - a.confidence);
-      setPlayers(analyzedPlayers.slice(0, 3));
+      setPlayers(analyzedPlayers.slice(0, 9)); // Top 9 (3 per category)
 
       toast.success('Analyse joueurs terminée');
     } catch (err) {
@@ -222,7 +255,6 @@ export function PlayerPillarPanel({
       
       if (error) throw error;
       if (data.success && data.analysis?.picks) {
-        // Merge AI picks with existing analysis
         toast.success('Analyse IA enrichie !');
       }
     } catch (err) {
@@ -241,18 +273,35 @@ export function PlayerPillarPanel({
     setOddsInputs(prev => ({ ...prev, [playerId]: value }));
     
     const odds = parseFloat(value);
-    if (!isNaN(odds) && odds > 1) {
-      const player = players.find(p => p.id === playerId);
-      if (player && onBetSelect) {
-        const stake = defaultStake;
-        onBetSelect({
-          id: playerId,
-          player,
-          manualOdds: odds,
-          stake,
-          potentialGain: stake * odds,
-        });
+    const player = players.find(p => p.id === playerId);
+    
+    if (!isNaN(odds) && odds > 1 && player && onBetSelect) {
+      // Determine category based on odds
+      let category: 'SAFE' | 'FUN' | 'SUPER_COMBO' = 'FUN';
+      if (odds < 2.50 && player.confidence >= 85) {
+        category = 'SAFE';
+      } else if (odds >= 4.00) {
+        category = 'SUPER_COMBO';
       }
+
+      onBetSelect({
+        id: playerId,
+        player,
+        manualOdds: odds,
+        stake: defaultStake,
+        potentialGain: defaultStake * odds,
+        category,
+      });
+    } else if (player && onBetSelect) {
+      // Clear selection if invalid odds
+      onBetSelect({
+        id: playerId,
+        player,
+        manualOdds: null,
+        stake: 0,
+        potentialGain: 0,
+        category: player.category,
+      });
     }
   };
 
@@ -264,10 +313,135 @@ export function PlayerPillarPanel({
   };
 
   const getConfidenceColor = (confidence: number) => {
-    if (confidence >= 75) return 'text-success';
-    if (confidence >= 60) return 'text-warning';
+    if (confidence >= 85) return 'text-success';
+    if (confidence >= 70) return 'text-warning';
     return 'text-muted-foreground';
   };
+
+  const safePlayers = players.filter(p => p.category === 'SAFE').slice(0, 3);
+  const funPlayers = players.filter(p => p.category === 'FUN').slice(0, 3);
+  const superComboPlayers = players.filter(p => p.category === 'SUPER_COMBO').slice(0, 3);
+
+  const renderPlayerCard = (player: PlayerAnalysis, showCategory: boolean = false) => {
+    const bet = selectedBets.get(player.id);
+    const inputOdds = oddsInputs[player.id] || '';
+    const parsedOdds = parseFloat(inputOdds);
+    const hasValidOdds = !isNaN(parsedOdds) && parsedOdds > 1;
+
+    return (
+      <div 
+        key={player.id}
+        className={`p-4 rounded-lg border-2 transition-all ${
+          bet && bet.manualOdds
+            ? 'border-primary bg-primary/5' 
+            : 'border-border/50 bg-card/50'
+        }`}
+      >
+        <div className="flex items-start justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-semibold">{player.name}</span>
+                <Badge variant="outline" className="text-xs">{player.team}</Badge>
+                {player.duoPartner && (
+                  <Badge className="bg-accent/20 text-accent border-accent/30 border text-xs">
+                    Duo
+                  </Badge>
+                )}
+                {player.learningBoost !== 0 && player.learningBoost !== undefined && (
+                  <Badge className={`text-xs ${player.learningBoost > 0 ? 'bg-success/20 text-success' : 'bg-destructive/20 text-destructive'}`}>
+                    {player.learningBoost > 0 ? '+' : ''}{player.learningBoost}%
+                  </Badge>
+                )}
+              </div>
+              <p className="text-sm text-muted-foreground">{player.match}</p>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className={`flex items-center gap-1 ${getConfidenceColor(player.confidence)}`}>
+              <span className="font-mono font-bold">{player.confidence}%</span>
+            </div>
+            <Progress value={player.confidence} className="w-16 h-1.5 mt-1" />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 mb-3 text-sm">
+          <div className="flex items-center gap-1">
+            <Target className="w-4 h-4 text-primary" />
+            <span>{player.goalsLast5} buts</span>
+          </div>
+          {player.ppGoals > 0 && (
+            <div className="flex items-center gap-1">
+              <Zap className="w-4 h-4 text-warning" />
+              <span>{player.ppGoals} PP</span>
+            </div>
+          )}
+          <span className="text-muted-foreground">{formatTime(player.matchTime)}</span>
+        </div>
+
+        <p className="text-sm text-muted-foreground italic mb-4">{player.reasoning}</p>
+
+        {/* Manual Odds Input */}
+        <div className="flex items-center gap-3 p-3 rounded-lg bg-secondary/50">
+          <div className="flex-1">
+            <label className="text-xs text-muted-foreground mb-1 block">
+              Cote Winamax (buteur/point)
+            </label>
+            <Input
+              type="number"
+              step="0.01"
+              min="1.01"
+              placeholder="Ex: 3.50"
+              value={inputOdds}
+              onChange={(e) => handleOddsChange(player.id, e.target.value)}
+              className="h-9 font-mono"
+            />
+          </div>
+          {hasValidOdds && (
+            <div className="text-right">
+              <p className="text-xs text-muted-foreground">Gain potentiel</p>
+              <p className="font-mono font-bold text-success">
+                +{((parsedOdds - 1) * defaultStake).toFixed(2)}€
+              </p>
+            </div>
+          )}
+        </div>
+
+        {bet && bet.manualOdds && (
+          <div className="flex items-center gap-1 mt-3 text-primary text-xs">
+            <Check className="w-3 h-3" />
+            <span>Ajouté au panier @{bet.manualOdds.toFixed(2)} ({bet.category})</span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderSection = (
+    title: string,
+    emoji: string,
+    playersList: PlayerAnalysis[],
+    icon: React.ElementType,
+    colorClass: string,
+    description: string
+  ) => (
+    <div className="mb-4">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-lg">{emoji}</span>
+        <span className="text-sm font-medium">{title}</span>
+        <Badge variant="outline" className="text-xs">{description}</Badge>
+      </div>
+      <div className="space-y-3">
+        {playersList.length > 0 ? (
+          playersList.map(player => renderPlayerCard(player))
+        ) : (
+          <p className="text-sm text-muted-foreground text-center py-4">
+            Aucun joueur {title} ce soir
+          </p>
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <Card className="glass-card p-6">
@@ -284,7 +458,7 @@ export function PlayerPillarPanel({
               </Badge>
             </h3>
             <p className="text-xs text-muted-foreground">
-              Analyse stats 2026 • Saisie cote Winamax
+              SAFE / FUN / SUPER COMBO • Saisie cote Winamax
             </p>
           </div>
         </div>
@@ -351,98 +525,15 @@ export function PlayerPillarPanel({
             </div>
           </div>
 
-          {players.map((player, index) => {
-            const bet = selectedBets.get(player.id);
-            const inputOdds = oddsInputs[player.id] || '';
-            const parsedOdds = parseFloat(inputOdds);
-            const hasValidOdds = !isNaN(parsedOdds) && parsedOdds > 1;
-
-            return (
-              <div 
-                key={player.id}
-                className={`p-4 rounded-lg border-2 transition-all ${
-                  bet 
-                    ? 'border-primary bg-primary/5' 
-                    : 'border-border/50 bg-card/50'
-                }`}
-              >
-                <div className="flex items-start justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs bg-primary/10 text-primary px-2 py-0.5 rounded">
-                      #{index + 1}
-                    </span>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold">{player.name}</span>
-                        <Badge variant="outline" className="text-xs">{player.team}</Badge>
-                        {player.duoPartner && (
-                          <Badge className="bg-accent/20 text-accent border-accent/30 border text-xs">
-                            Duo
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-sm text-muted-foreground">{player.match}</p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className={`flex items-center gap-1 ${getConfidenceColor(player.confidence)}`}>
-                      <span className="font-mono font-bold">{player.confidence}%</span>
-                    </div>
-                    <Progress value={player.confidence} className="w-16 h-1.5 mt-1" />
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-4 mb-3 text-sm">
-                  <div className="flex items-center gap-1">
-                    <Target className="w-4 h-4 text-primary" />
-                    <span>{player.goalsLast5} buts</span>
-                  </div>
-                  {player.ppGoals > 0 && (
-                    <div className="flex items-center gap-1">
-                      <Zap className="w-4 h-4 text-warning" />
-                      <span>{player.ppGoals} PP</span>
-                    </div>
-                  )}
-                  <span className="text-muted-foreground">{formatTime(player.matchTime)}</span>
-                </div>
-
-                <p className="text-sm text-muted-foreground italic mb-4">{player.reasoning}</p>
-
-                {/* Manual Odds Input */}
-                <div className="flex items-center gap-3 p-3 rounded-lg bg-secondary/50">
-                  <div className="flex-1">
-                    <label className="text-xs text-muted-foreground mb-1 block">
-                      Cote Winamax (buteur/point)
-                    </label>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      min="1.01"
-                      placeholder="Ex: 3.50"
-                      value={inputOdds}
-                      onChange={(e) => handleOddsChange(player.id, e.target.value)}
-                      className="h-9 font-mono"
-                    />
-                  </div>
-                  {hasValidOdds && (
-                    <div className="text-right">
-                      <p className="text-xs text-muted-foreground">Gain potentiel</p>
-                      <p className="font-mono font-bold text-success">
-                        +{((parsedOdds - 1) * defaultStake).toFixed(2)}€
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                {bet && (
-                  <div className="flex items-center gap-1 mt-3 text-primary text-xs">
-                    <Check className="w-3 h-3" />
-                    <span>Ajouté au panier @{bet.manualOdds?.toFixed(2)}</span>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {renderSection('SAFE', '🛡️', safePlayers, Shield, 'bg-success/20 text-success', 'Confiance ≥85%')}
+          
+          <div className="border-t border-border/50 pt-4">
+            {renderSection('FUN', '🎲', funPlayers, Zap, 'bg-warning/20 text-warning', 'Confiance 70-84%')}
+          </div>
+          
+          <div className="border-t border-border/50 pt-4">
+            {renderSection('SUPER COMBO', '🎰', superComboPlayers, Sparkles, 'bg-primary/20 text-primary', 'Cote ≥4.00')}
+          </div>
         </div>
       )}
     </Card>
