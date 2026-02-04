@@ -1,70 +1,42 @@
 
-# Plan : Corriger la synchronisation des cotes Winamax
 
-## Problème Identifié
+# Plan : Activer les blocs DUO et FUN
 
-D'après les logs de la fonction `sync-winamax-odds` :
-- **H2H : 10 matchs reçus** mais 0 cotes insérées
-- **Player props : erreur 422** (marché non supporté pour EU/FR)
+## Diagnostic
 
-L'API retourne des matchs mais **aucun bookmaker Winamax n'est trouvé** car :
-1. La clé utilisée est `winamax` au lieu de `winamax_fr`
-2. L'API ne supporte pas le filtre `bookmakers=` pour limiter à un seul bookmaker - il faut utiliser `regions=fr` et filtrer côté code
-3. Les marchés `player_anytime_goal_scorer` et `player_points` ne sont **pas disponibles pour la NHL en région FR/EU** (uniquement US)
+Les logs montrent clairement :
+```
+Données envoyées à l'IA: 0 buteurs actifs, 0 duos actifs
+```
+
+### Cause 1 : Pas de duos
+L'endpoint `boxscore/playerByGameStats` ne fournit pas les assistants sur chaque but. Le code assigne `assist1: undefined` donc `duo = null` pour tous les buts.
+
+### Cause 2 : Pas de cotes buteurs
+The Odds API ne propose pas le marché `player_anytime_goal_scorer` pour la région FR. Seules les cotes H2H (victoire) sont disponibles.
 
 ---
 
 ## Solution
 
-### 1. Corriger la requête API
+### 1. Récupérer les vrais duos via Play-By-Play
 
-Modifier l'URL pour utiliser la région `fr` sans filtre bookmaker, puis filtrer côté code :
+Utiliser l'endpoint NHL `play-by-play` qui contient les détails complets de chaque but :
+- `https://api-web.nhle.com/v1/gamecenter/{gameId}/play-by-play`
 
-```typescript
-// AVANT (ne fonctionne pas)
-const url = `${baseUrl}?apiKey=${oddsApiKey}&regions=eu&markets=${market}&bookmakers=winamax`;
+Cet endpoint retourne pour chaque but :
+- `scoringPlayerId` + nom du buteur
+- `assist1PlayerId` + nom de l'assistant 1
+- `assist2PlayerId` + nom de l'assistant 2
+- `goalModifier` (PP, SH, EN, etc.)
 
-// APRÈS (correct)
-const url = `${baseUrl}?apiKey=${oddsApiKey}&regions=fr&markets=${market}`;
-```
+### 2. Récupérer les cotes buteurs via région US
 
-### 2. Corriger le filtre bookmaker
+Ajouter une requête secondaire à The Odds API avec `regions=us` pour le marché `player_anytime_goal_scorer`. Les bookmakers US (DraftKings, FanDuel, BetMGM) proposent ces cotes.
 
-Chercher la clé exacte `winamax_fr` dans la réponse :
+### 3. Adapter la stratégie FUN
 
-```typescript
-// AVANT
-const winamax = game.bookmakers?.find((b: any) => 
-  b.key === 'winamax' || b.title?.toLowerCase().includes('winamax')
-);
-
-// APRÈS
-const winamax = game.bookmakers?.find((b: any) => 
-  b.key === 'winamax_fr'
-);
-```
-
-### 3. Limiter aux marchés disponibles
-
-Seul le marché `h2h` (victoire) est disponible pour la NHL en région FR. Les marchés `player_anytime_goal_scorer` et `player_points` ne sont disponibles que pour les bookmakers US.
-
-Options :
-- **Option A** : Garder uniquement `h2h` pour FR (approche simple)
-- **Option B** : Ajouter une deuxième requête avec `regions=us` pour récupérer les player props de bookmakers US (DraftKings, FanDuel, etc.)
-
-Je recommande l'**Option A** pour l'instant car l'objectif est d'avoir des cotes H2H pour le bloc SAFE.
-
-### 4. Ajouter des logs de debug
-
-Pour comprendre ce que l'API retourne, ajouter un log des bookmakers disponibles :
-
-```typescript
-for (const game of data) {
-  console.log(`Game: ${game.home_team} vs ${game.away_team}`);
-  console.log(`Bookmakers: ${game.bookmakers?.map(b => b.key).join(', ')}`);
-  // ...
-}
-```
+Si aucune cote buteur n'est disponible, le bloc FUN pourra utiliser une cote H2H d'outsider (cote > 4.00).
 
 ---
 
@@ -72,156 +44,92 @@ for (const game of data) {
 
 | Fichier | Modification |
 |---------|--------------|
-| `supabase/functions/sync-winamax-odds/index.ts` | Corriger la requête API et le filtre bookmaker |
-
----
-
-## Résultat Attendu
-
-Après correction :
-1. Les cotes H2H Winamax seront récupérées et insérées dans `winamax_odds`
-2. La fonction `betting-strategy` pourra générer un bloc SAFE avec ces données
-3. Les erreurs 422 pour les player props disparaîtront (marchés retirés de la liste)
+| `supabase/functions/sync-nhl-stats/index.ts` | Remplacer `boxscore` par `play-by-play` pour extraire les vrais duos |
+| `supabase/functions/sync-winamax-odds/index.ts` | Ajouter une requête US pour les cotes buteurs |
+| `supabase/functions/betting-strategy/index.ts` | Fallback FUN sur H2H outsider si pas de cotes buteurs |
 
 ---
 
 ## Détails Techniques
 
-### Code corrigé
+### Modification sync-nhl-stats
+
+Ajouter une fonction pour extraire les buts depuis play-by-play :
 
 ```typescript
-import "https://deno.land/x/xhr@0.1.0/mod.ts";
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
-
-serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
-  }
-
-  try {
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const oddsApiKey = Deno.env.get('THE_ODDS_API_KEY');
-    
-    if (!oddsApiKey) {
-      throw new Error('THE_ODDS_API_KEY not configured');
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseKey);
-    console.log('Starting Winamax odds sync...');
-
-    const baseUrl = 'https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds';
-    
-    // Seul le marché h2h est disponible pour la NHL en région FR
-    const markets = ['h2h'];
-    const oddsToInsert: any[] = [];
-
-    for (const market of markets) {
-      try {
-        // Utiliser la région FR pour avoir Winamax
-        const url = `${baseUrl}?apiKey=${oddsApiKey}&regions=fr&markets=${market}`;
-        console.log(`Fetching ${market} odds from FR region...`);
-        
-        const response = await fetch(url);
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`Failed to fetch ${market} odds: ${response.status} - ${errorText}`);
-          continue;
-        }
-
-        const data = await response.json();
-        console.log(`Received ${data.length} games for ${market}`);
-
-        for (const game of data) {
-          const commenceTime = new Date(game.commence_time);
-          const matchName = `${game.away_team} @ ${game.home_team}`;
-          
-          // Log des bookmakers disponibles pour debug
-          const bookmakerKeys = game.bookmakers?.map((b: any) => b.key) || [];
-          console.log(`Match: ${matchName} - Bookmakers: ${bookmakerKeys.join(', ')}`);
-
-          // Chercher Winamax FR avec la bonne clé
-          const winamax = game.bookmakers?.find((b: any) => b.key === 'winamax_fr');
-
-          if (!winamax) {
-            console.log(`No Winamax for ${matchName}`);
-            continue;
-          }
-
-          for (const marketData of winamax.markets || []) {
-            for (const outcome of marketData.outcomes || []) {
-              oddsToInsert.push({
-                commence_time: commenceTime.toISOString(),
-                match_name: matchName,
-                selection: outcome.name,
-                price: outcome.price,
-                market_type: 'h2h',
-                fetched_at: new Date().toISOString(),
-              });
-            }
-          }
-        }
-      } catch (error) {
-        console.error(`Error fetching ${market} odds:`, error);
-      }
-    }
-
-    console.log(`Total Winamax odds collected: ${oddsToInsert.length}`);
-
-    if (oddsToInsert.length > 0) {
-      const matchNames = [...new Set(oddsToInsert.map(o => o.match_name))];
+async function fetchGamePlayByPlay(gameId: string): Promise<GoalData[]> {
+  const url = `https://api-web.nhle.com/v1/gamecenter/${gameId}/play-by-play`;
+  const response = await fetch(url);
+  if (!response.ok) return [];
+  
+  const data = await response.json();
+  const goals: GoalData[] = [];
+  
+  for (const play of data.plays || []) {
+    if (play.typeDescKey === 'goal') {
+      const details = play.details || {};
       
-      await supabase
-        .from('winamax_odds')
-        .delete()
-        .in('match_name', matchNames);
-
-      const { error: insertError } = await supabase
-        .from('winamax_odds')
-        .insert(oddsToInsert);
-
-      if (insertError) {
-        console.error('Error inserting odds:', insertError);
-        throw insertError;
-      }
-
-      console.log(`Inserted ${oddsToInsert.length} Winamax odds records`);
+      goals.push({
+        scorer: details.scoringPlayerName || details.scoringPlayerFirstName + ' ' + details.scoringPlayerLastName,
+        scorerTeamAbbr: details.eventOwnerTeamId, // Will need mapping
+        assist1: details.assist1PlayerName || null,
+        assist2: details.assist2PlayerName || null,
+        situation: play.situationCode?.includes('PP') ? 'PP' : 'EV',
+        period: play.periodDescriptor?.number || 0,
+        timeInPeriod: play.timeInPeriod || '00:00',
+      });
     }
-
-    await supabase
-      .from('cron_config')
-      .update({ last_run_at: new Date().toISOString() })
-      .eq('job_name', 'sync_winamax_odds');
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        oddsRecorded: oddsToInsert.length,
-        matchesProcessed: [...new Set(oddsToInsert.map(o => o.match_name))].length,
-      }),
-      { 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200 
-      }
-    );
-
-  } catch (error) {
-    console.error('Sync Winamax odds error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return new Response(
-      JSON.stringify({ success: false, error: errorMessage }),
-      { 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 500 
-      }
-    );
   }
-});
+  
+  return goals;
+}
 ```
+
+### Modification sync-winamax-odds
+
+Ajouter une requête pour les cotes buteurs US :
+
+```typescript
+// Fetch goal scorer odds from US region (DraftKings, FanDuel)
+const usUrl = `${baseUrl}?apiKey=${oddsApiKey}&regions=us&markets=player_anytime_goal_scorer`;
+const usResponse = await fetch(usUrl);
+
+if (usResponse.ok) {
+  const usData = await usResponse.json();
+  for (const game of usData) {
+    // Extract from any US bookmaker (DraftKings preferred)
+    const bookmaker = game.bookmakers?.find(b => 
+      ['draftkings', 'fanduel', 'betmgm'].includes(b.key)
+    );
+    // ... insert goal scorer odds
+  }
+}
+```
+
+### Modification betting-strategy
+
+Fallback FUN sur cote H2H outsider :
+
+```typescript
+// Si pas de goal scorer odds, utiliser H2H outsider pour FUN
+const funFromH2H = h2hOdds
+  .filter(o => o.price >= 4.00) // Grosse cote = outsider
+  .slice(0, 5)
+  .map(o => ({
+    player: o.selection, // C'est une équipe, pas un joueur
+    match: o.match_name,
+    odds: o.price,
+    type: 'H2H_OUTSIDER',
+  }));
+```
+
+---
+
+## Résultat Attendu
+
+Après ces modifications :
+1. **Duos** : La table `player_stats` contiendra les vrais duos buteur+assistant
+2. **Cotes buteurs** : Les cotes US seront disponibles dans `winamax_odds` (marché `player_anytime_goal_scorer`)
+3. **Bloc FUN** : Toujours disponible via cote buteur US ou H2H outsider
+4. **Bloc DUO** : Généré à partir des duos performants de la saison
+
