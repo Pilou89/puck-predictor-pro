@@ -6,6 +6,44 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
+interface PlayerComboSelection {
+  name: string;
+  team: string;
+  match: string;
+  betType: 'Buteur' | 'Point' | 'But+Passe';
+  estimatedOdds: number;
+  reason: string;
+  learningScore: number;
+}
+
+interface AIPlayerCombo {
+  name: string;
+  type: 'SAFE' | 'FUN' | 'SUPER_COMBO';
+  systemType: string;
+  stakePerCombo: number;
+  totalStake: number;
+  selections: PlayerComboSelection[];
+  combinationsCount: number;
+  potentialGains: {
+    min: number;
+    max: number;
+  };
+  minRecoveryPercent?: number;
+  confidence: number;
+  reasoning: string;
+}
+
+// Calculate combinations (n choose k)
+function combinations(n: number, k: number): number {
+  if (k > n || k < 0) return 0;
+  if (k === 0 || k === n) return 1;
+  let result = 1;
+  for (let i = 0; i < k; i++) {
+    result = result * (n - i) / (i + 1);
+  }
+  return Math.round(result);
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -21,23 +59,23 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    console.log('Generating AI Super Combo suggestions...');
+    console.log('Generating AI Player Combo suggestions with learning...');
 
     // Get today's date in Paris timezone
     const parisTime = new Date().toLocaleString('en-US', { timeZone: 'Europe/Paris' });
     const now = new Date(parisTime);
-    const fiveDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const fourteenDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     
     // Season start
     const seasonStart = now.getMonth() >= 9 
       ? `${now.getFullYear()}-10-01` 
       : `${now.getFullYear() - 1}-10-01`;
 
-    // Fetch recent player stats
+    // Fetch recent player stats (14 days)
     const { data: playerStats, error: statsError } = await supabase
       .from('player_stats')
       .select('scorer, team_abbr, situation, duo, assist1, assist2, game_date, match_name')
-      .gte('game_date', fiveDaysAgo)
+      .gte('game_date', fourteenDaysAgo)
       .order('game_date', { ascending: false });
 
     if (statsError) {
@@ -50,6 +88,31 @@ serve(async (req) => {
       .from('player_stats')
       .select('scorer, team_abbr, match_name')
       .gte('game_date', seasonStart);
+
+    // Fetch learning metrics for players
+    const { data: learningMetrics } = await supabase
+      .from('learning_metrics')
+      .select('*')
+      .order('wins', { ascending: false });
+
+    // Build learning context for AI prompt
+    const playerLearning = (learningMetrics || [])
+      .filter(m => m.metric_type === 'player' && (m.total || 0) >= 2)
+      .map(m => {
+        const winRate = m.total ? Math.round((m.wins || 0) / m.total * 100) : 0;
+        const adj = m.confidence_adjustment || 0;
+        return `${m.metric_key}: ${winRate}% (${m.total} paris), ajust. ${adj > 0 ? '+' : ''}${adj}%`;
+      })
+      .slice(0, 15)
+      .join('\n');
+
+    const comboLearning = (learningMetrics || [])
+      .filter(m => m.metric_type === 'context' && ['safe_bets', 'fun_bets', 'super_combo_bets'].includes(m.metric_key))
+      .map(m => {
+        const winRate = m.total ? Math.round((m.wins || 0) / m.total * 100) : 0;
+        return `${m.metric_key}: ${winRate}% réussite (${m.total} paris), ROI: ${m.roi || 0}%`;
+      })
+      .join('\n');
 
     // Build historical goals map
     const historicalGoals = new Map<string, Map<string, number>>();
@@ -122,7 +185,7 @@ serve(async (req) => {
       }))
       .filter(p => p.goals >= 1 || p.points >= 2)
       .sort((a, b) => b.points - a.points)
-      .slice(0, 20);
+      .slice(0, 25);
 
     // Fetch H2H odds for tonight
     const { data: h2hOdds } = await supabase
@@ -162,13 +225,6 @@ serve(async (req) => {
       return acc;
     }, []);
 
-    // Get relevant odds for teams
-    const teamOdds = (h2hOdds || []).map(o => ({
-      selection: o.selection,
-      match: o.match_name,
-      odds: o.price,
-    }));
-
     // Build context for AI - enhanced with match data
     const playersContext = topPerformers.map(p => {
       const matchInfo = tonightMatches.find(m => m.homeTeam === p.team || m.awayTeam === p.team);
@@ -191,8 +247,25 @@ serve(async (req) => {
       };
     }).filter((p): p is NonNullable<typeof p> => p !== null);
 
-    // Build AI prompt for Super Combo suggestions
-    const comboPrompt = `Tu es un expert en paris sportifs NHL. Analyse les matchs de ce soir et propose des combinaisons système optimales.
+    if (playersContext.length === 0) {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          combos: [],
+          analysis: "Aucun match trouvé ce soir ou données insuffisantes.",
+          context: { matchesTonight: tonightMatches.length, playersAnalyzed: 0 }
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+      );
+    }
+
+    // Build AI prompt for 3 Player Combo suggestions
+    const comboPrompt = `Tu es un expert en paris sportifs NHL. Analyse les matchs de ce soir et propose 3 combinaisons JOUEURS optimales.
+
+## RÈGLES IMPORTANTES:
+1. UNIQUEMENT des buteurs ou pointeurs (PAS d'équipes)
+2. Chaque combo = sélections JOUEURS uniquement
+3. Les cotes estimées doivent être réalistes (buteur ~2.50-4.50, point ~1.80-2.50)
 
 ## MATCHS DE CE SOIR:
 ${tonightMatches.map(m => 
@@ -201,56 +274,90 @@ ${tonightMatches.map(m =>
    Home PIM: ${m.homePIM.toFixed(1)}/G | Away PIM: ${m.awayPIM.toFixed(1)}/G`
 ).join('\n')}
 
-## COTES ÉQUIPES DISPONIBLES:
-${teamOdds.map(o => `- ${o.selection}: @${o.odds.toFixed(2)} (${o.match})`).join('\n')}
-
 ## JOUEURS EN FORME (14 derniers jours):
 ${playersContext.map(p => 
   `- ${p.name} (${p.team}): ${p.goals} buts, ${p.points} pts en ${p.gamesPlayed} matchs${p.ppGoals > 0 ? `, ${p.ppGoals} PP` : ''}${p.duo ? `, duo ${p.duo}` : ''}
    Match: ${p.match} | Adversaire B2B: ${p.opponentB2B ? 'OUI 🔋' : 'Non'} | PIM adversaire: ${p.opponentPIM.toFixed(1)}/G${p.goalsVsOpponent > 0 ? ` | ⚡ ${p.goalsVsOpponent} but(s) vs ${p.opponent} cette saison` : ''}`
 ).join('\n')}
 
-## CONSIGNES:
-1. Propose 2-3 combinaisons système différentes:
-   - Un système SAFE (2-3 sélections à cotes modérées 1.50-2.50, haute probabilité)
-   - Un système FUN (3-4 sélections à cotes moyennes 2.00-4.00, bon équilibre)
-   - Un système SUPER COMBO (3-5 sélections incluant des grosses cotes, gros gain potentiel)
+## HISTORIQUE D'APPRENTISSAGE (favoriser les joueurs avec bon score):
+${playerLearning || 'Pas encore de données d\'apprentissage'}
 
-2. Chaque combinaison doit inclure:
-   - Des buteurs en forme
-   - Optionnellement une équipe favorite ou underdog intéressant
-   - Privilégier les adversaires en B2B ou indisciplinés
+## PERFORMANCES COMBOS PASSÉS:
+${comboLearning || 'Pas encore de données sur les combos'}
 
-3. Pour chaque sélection, estime une cote réaliste (entre 1.50 et 8.00)
+## 3 COMBINAISONS À PROPOSER:
 
-4. Calcule la cote combinée et propose un type de système (ex: Système 2/3)
+### COMBO SAFE (récupération de mise) 🛡️
+- Système 2/3 ou 2/4
+- 3-4 joueurs avec cotes 2.00-3.00 (paris "Point marqué" ou "Buteur" sur joueurs réguliers)
+- Objectif: Si 2 sélections passent, on récupère ~80% de la mise
+- Privilégier joueurs réguliers, adversaires fatigués (B2B) ou indisciplinés (PIM élevé)
 
-Réponds en JSON avec ce format:
+### COMBO FUN (équilibre) 🎲
+- Système 2/4 ou 3/4  
+- 3-4 joueurs avec cotes 2.50-4.00
+- Bon ratio risque/gain
+- Mix de valeurs sûres et d'outsiders intéressants
+
+### SUPER COMBO (gros gains) 🎰
+- Système 3/5 ou 4/5
+- 4-5 joueurs avec cotes 3.50-6.00
+- Joueurs en feu avec opportunités PP contre équipes indisciplinées
+- Potentiel de gros gains
+
+## CALCUL RÉCUPÉRATION MISE (SAFE):
+Pour un système 2/3 avec mise 0.50€/combo (3 combos = 1.50€):
+- Si 3/3 passent: Somme des gains de toutes les combinaisons gagnantes
+- Si 2/3 passent: Gain = coteA * coteB * 0.50€
+- Objectif SAFE: 2 sélections gagnantes = ~1.20€ (récup 80% de 1.50€)
+
+Réponds en JSON avec ce format EXACT:
 {
   "combos": [
     {
-      "name": "Système SAFE 2/3",
+      "name": "Combo SAFE Joueurs 2/3",
       "type": "SAFE",
       "systemType": "2/3",
+      "stakePerCombo": 0.50,
       "selections": [
         {
           "name": "Nikita Kucherov",
-          "type": "player",
-          "betType": "Buteur",
+          "team": "TBL",
           "match": "TBL vs BOS",
-          "estimatedOdds": 3.50,
-          "reason": "En feu avec 4 buts en 5 matchs"
+          "betType": "Point",
+          "estimatedOdds": 2.20,
+          "reason": "4 pts en 3 matchs, adversaire en B2B",
+          "learningScore": 0
         }
       ],
-      "combinedOdds": 12.25,
-      "confidence": 70,
-      "reasoning": "Combinaison solide basée sur..."
+      "minRecoveryPercent": 80,
+      "confidence": 75,
+      "reasoning": "Combinaison sécurisée basée sur des joueurs réguliers..."
+    },
+    {
+      "name": "Combo FUN Joueurs 2/4",
+      "type": "FUN",
+      "systemType": "2/4",
+      "stakePerCombo": 0.25,
+      "selections": [...],
+      "confidence": 60,
+      "reasoning": "..."
+    },
+    {
+      "name": "Super Combo Joueurs 3/5",
+      "type": "SUPER_COMBO",
+      "systemType": "3/5",
+      "stakePerCombo": 0.20,
+      "selections": [...],
+      "confidence": 40,
+      "reasoning": "..."
     }
   ],
   "analysis": "Résumé de l'analyse du soir en 2-3 phrases"
 }`;
 
-    console.log('Calling Lovable AI for combo suggestions...');
+    console.log('Calling Lovable AI for player combo suggestions...');
 
     const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
       method: 'POST',
@@ -263,7 +370,7 @@ Réponds en JSON avec ce format:
         messages: [
           { 
             role: 'system', 
-            content: 'Tu es un analyste expert en paris sportifs NHL. Tu crées des combinaisons système optimales. Tu réponds uniquement en JSON valide.' 
+            content: 'Tu es un analyste expert en paris sportifs NHL. Tu crées des combinaisons système JOUEURS optimales. Tu réponds uniquement en JSON valide sans markdown.' 
           },
           { role: 'user', content: comboPrompt }
         ],
@@ -294,23 +401,82 @@ Réponds en JSON avec ce format:
     const aiData = await aiResponse.json();
     const aiContent = aiData.choices?.[0]?.message?.content;
 
-    console.log('AI Combo Response received:', aiContent?.substring(0, 300));
+    console.log('AI Combo Response received:', aiContent?.substring(0, 500));
 
     // Parse AI response
-    let comboResult;
+    let comboResult: { combos: AIPlayerCombo[], analysis: string };
     try {
       let jsonStr = aiContent;
       const jsonMatch = aiContent.match(/```json\s*([\s\S]*?)\s*```/);
       if (jsonMatch) {
         jsonStr = jsonMatch[1];
       }
-      comboResult = JSON.parse(jsonStr);
+      // Clean up any remaining markdown
+      jsonStr = jsonStr.replace(/```/g, '').trim();
+      
+      const parsed = JSON.parse(jsonStr);
+      
+      // Ensure combos have calculated values
+      const combos = (parsed.combos || []).map((combo: any) => {
+        const systemParts = combo.systemType.split('/');
+        const required = parseInt(systemParts[0]) || 2;
+        const total = parseInt(systemParts[1]) || combo.selections?.length || 3;
+        const combinationsCount = combinations(total, required);
+        const stakePerCombo = combo.stakePerCombo || 0.50;
+        const totalStake = stakePerCombo * combinationsCount;
+
+        // Calculate potential gains
+        const allOdds = (combo.selections || []).map((s: any) => s.estimatedOdds || 2.0);
+        
+        // Min gain: minimum required selections winning with lowest odds combination
+        let minGain = 0;
+        if (allOdds.length >= required) {
+          const sortedOdds = [...allOdds].sort((a, b) => a - b);
+          const minComboOdds = sortedOdds.slice(0, required).reduce((acc, o) => acc * o, 1);
+          minGain = stakePerCombo * minComboOdds;
+        }
+
+        // Max gain: all selections winning
+        let maxGain = 0;
+        if (allOdds.length >= required) {
+          // Generate all combinations and sum their gains
+          const generateCombos = (arr: number[], k: number): number[][] => {
+            if (k === 0) return [[]];
+            if (arr.length < k) return [];
+            const [first, ...rest] = arr;
+            const withFirst = generateCombos(rest, k - 1).map(c => [first, ...c]);
+            const withoutFirst = generateCombos(rest, k);
+            return [...withFirst, ...withoutFirst];
+          };
+          const allCombos = generateCombos(allOdds, required);
+          maxGain = allCombos.reduce((sum, combo) => {
+            const comboOdds = combo.reduce((acc, o) => acc * o, 1);
+            return sum + (stakePerCombo * comboOdds);
+          }, 0);
+        }
+
+        return {
+          ...combo,
+          combinationsCount,
+          totalStake,
+          stakePerCombo,
+          potentialGains: {
+            min: parseFloat(minGain.toFixed(2)),
+            max: parseFloat(maxGain.toFixed(2)),
+          }
+        };
+      });
+
+      comboResult = {
+        combos,
+        analysis: parsed.analysis || "Analyse IA générée.",
+      };
     } catch (parseError) {
       console.error('Failed to parse AI combo response:', parseError);
+      console.error('Raw content:', aiContent);
       comboResult = {
         combos: [],
-        analysis: "L'analyse IA n'a pas pu être générée.",
-        raw_response: aiContent
+        analysis: "L'analyse IA n'a pas pu être générée correctement.",
       };
     }
 
@@ -322,6 +488,7 @@ Réponds en JSON avec ce format:
         context: {
           matchesTonight: tonightMatches.length,
           playersAnalyzed: playersContext.length,
+          learningDataUsed: (learningMetrics?.length || 0) > 0,
         }
       }),
       { 

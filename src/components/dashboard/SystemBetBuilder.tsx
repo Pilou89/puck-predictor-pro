@@ -6,7 +6,6 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { 
   Layers,
-  Plus,
   X,
   Calculator,
   DollarSign,
@@ -16,47 +15,41 @@ import {
   Sparkles,
   Target,
   Users,
-  Info,
   Brain,
   RefreshCw,
   Zap,
-  Shield
+  Shield,
+  ChevronRight,
+  Trophy,
+  Percent
 } from "lucide-react";
 import { toast } from "sonner";
 import { useBankroll } from "@/hooks/useBankroll";
 import { supabase } from "@/integrations/supabase/client";
 
-interface SystemSelection {
-  id: string;
+interface PlayerSelection {
   name: string;
+  team: string;
   match: string;
-  odds: number;
-  type: 'team' | 'player';
-  betType?: string;
-  reason?: string;
-  status?: 'won' | 'lost' | 'pending';
+  betType: 'Buteur' | 'Point' | 'But+Passe';
+  estimatedOdds: number;
+  reason: string;
+  learningScore: number;
 }
 
-interface SystemType {
-  name: string;
-  required: number;
-  total: number;
-  combinations: number;
-}
-
-interface AIComboSuggestion {
+interface AIPlayerCombo {
   name: string;
   type: 'SAFE' | 'FUN' | 'SUPER_COMBO';
   systemType: string;
-  selections: {
-    name: string;
-    type: 'team' | 'player';
-    betType: string;
-    match: string;
-    estimatedOdds: number;
-    reason: string;
-  }[];
-  combinedOdds: number;
+  stakePerCombo: number;
+  totalStake: number;
+  selections: PlayerSelection[];
+  combinationsCount: number;
+  potentialGains: {
+    min: number;
+    max: number;
+  };
+  minRecoveryPercent?: number;
   confidence: number;
   reasoning: string;
 }
@@ -76,63 +69,18 @@ function combinations(n: number, k: number): number {
   return Math.round(result);
 }
 
-// Generate all possible combinations
-function generateCombinations<T>(arr: T[], k: number): T[][] {
-  if (k === 0) return [[]];
-  if (arr.length < k) return [];
-  
-  const [first, ...rest] = arr;
-  const withFirst = generateCombinations(rest, k - 1).map(comb => [first, ...comb]);
-  const withoutFirst = generateCombinations(rest, k);
-  
-  return [...withFirst, ...withoutFirst];
-}
-
-// Get available system types for a given number of selections
-function getAvailableSystemTypes(selectionsCount: number): SystemType[] {
-  const systems: SystemType[] = [];
-  
-  for (let required = 2; required <= selectionsCount; required++) {
-    const numCombos = combinations(selectionsCount, required);
-    systems.push({
-      name: required === selectionsCount 
-        ? `Combiné ${selectionsCount} pronostics` 
-        : `Système ${required}/${selectionsCount}`,
-      required,
-      total: selectionsCount,
-      combinations: numCombos,
-    });
-  }
-  
-  return systems;
-}
-
 export function SystemBetBuilder({ onClose }: SystemBetBuilderProps) {
   const { addBet, isUpdating } = useBankroll();
-  const [selections, setSelections] = useState<SystemSelection[]>([]);
-  const [selectedSystemIndex, setSelectedSystemIndex] = useState<number>(0);
-  const [stakePerCombo, setStakePerCombo] = useState<string>("0.25");
-  const [isPlacing, setIsPlacing] = useState(false);
   
   // AI Suggestions state
-  const [aiSuggestions, setAiSuggestions] = useState<AIComboSuggestion[]>([]);
+  const [aiCombos, setAiCombos] = useState<AIPlayerCombo[]>([]);
   const [aiAnalysis, setAiAnalysis] = useState<string>("");
   const [isLoadingAI, setIsLoadingAI] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [isPlacing, setIsPlacing] = useState<string | null>(null);
   
-  const [newSelection, setNewSelection] = useState({
-    name: "",
-    match: "",
-    odds: "",
-    type: "player" as 'team' | 'player'
-  });
-
-  const availableSystems = useMemo(() => 
-    getAvailableSystemTypes(selections.length),
-    [selections.length]
-  );
-
-  const selectedSystem = availableSystems[selectedSystemIndex] || null;
+  // Editable stakes per combo type
+  const [editableStakes, setEditableStakes] = useState<Record<string, number>>({});
 
   // Fetch AI suggestions on mount
   const fetchAISuggestions = async () => {
@@ -148,9 +96,19 @@ export function SystemBetBuilder({ onClose }: SystemBetBuilderProps) {
       }
 
       if (data?.success && data.combos) {
-        setAiSuggestions(data.combos);
+        setAiCombos(data.combos);
         setAiAnalysis(data.analysis || '');
-        toast.success(`${data.combos.length} combinaisons IA générées ! 🎰`);
+        
+        // Initialize editable stakes
+        const stakes: Record<string, number> = {};
+        data.combos.forEach((c: AIPlayerCombo) => {
+          stakes[c.type] = c.stakePerCombo || 0.50;
+        });
+        setEditableStakes(stakes);
+        
+        if (data.combos.length > 0) {
+          toast.success(`${data.combos.length} combinaisons JOUEURS générées ! 🎰`);
+        }
       } else if (data?.error) {
         throw new Error(data.error);
       }
@@ -168,136 +126,88 @@ export function SystemBetBuilder({ onClose }: SystemBetBuilderProps) {
     fetchAISuggestions();
   }, []);
 
-  // Load AI suggestion into selections
-  const loadAISuggestion = (combo: AIComboSuggestion) => {
-    const newSelections: SystemSelection[] = combo.selections.map((sel, i) => ({
-      id: `ai-${Date.now()}-${i}`,
-      name: sel.name,
-      match: sel.match,
-      odds: sel.estimatedOdds,
-      type: sel.type,
-      betType: sel.betType,
-      reason: sel.reason,
-      status: 'pending',
-    }));
-
-    setSelections(newSelections);
+  // Recalculate gains when stake changes
+  const getRecalculatedCombo = (combo: AIPlayerCombo): AIPlayerCombo => {
+    const stakePerCombo = editableStakes[combo.type] || combo.stakePerCombo;
+    const totalStake = stakePerCombo * combo.combinationsCount;
     
-    // Auto-select appropriate system type
     const systemParts = combo.systemType.split('/');
-    if (systemParts.length === 2) {
-      const required = parseInt(systemParts[0]);
-      const total = parseInt(systemParts[1]);
-      if (total === newSelections.length) {
-        const idx = availableSystems.findIndex(s => s.required === required && s.total === total);
-        if (idx >= 0) setSelectedSystemIndex(idx);
-      }
+    const required = parseInt(systemParts[0]) || 2;
+    
+    const allOdds = combo.selections.map(s => s.estimatedOdds);
+    
+    // Recalculate gains
+    let minGain = 0;
+    let maxGain = 0;
+    
+    if (allOdds.length >= required) {
+      const sortedOdds = [...allOdds].sort((a, b) => a - b);
+      const minComboOdds = sortedOdds.slice(0, required).reduce((acc, o) => acc * o, 1);
+      minGain = stakePerCombo * minComboOdds;
+      
+      // Generate all combinations for max gain
+      const generateCombos = (arr: number[], k: number): number[][] => {
+        if (k === 0) return [[]];
+        if (arr.length < k) return [];
+        const [first, ...rest] = arr;
+        const withFirst = generateCombos(rest, k - 1).map(c => [first, ...c]);
+        const withoutFirst = generateCombos(rest, k);
+        return [...withFirst, ...withoutFirst];
+      };
+      const allCombos = generateCombos(allOdds, required);
+      maxGain = allCombos.reduce((sum, c) => {
+        const comboOdds = c.reduce((acc, o) => acc * o, 1);
+        return sum + (stakePerCombo * comboOdds);
+      }, 0);
     }
-
-    toast.success(`Combinaison "${combo.name}" chargée !`);
-  };
-
-  // Calculate stakes and potential gains
-  const calculation = useMemo(() => {
-    if (!selectedSystem || selections.length < 2) return null;
-
-    const stake = parseFloat(stakePerCombo) || 0;
-    const totalStake = stake * selectedSystem.combinations;
-    
-    const allCombos = generateCombinations(selections, selectedSystem.required);
-    
-    const comboOdds = allCombos.map(combo => 
-      combo.reduce((acc, sel) => acc * sel.odds, 1)
-    );
-    
-    const maxGain = comboOdds.reduce((sum, odds) => sum + (stake * odds), 0);
-    const minComboOdds = Math.min(...comboOdds);
-    const minGain = stake * minComboOdds;
-
-    const combosDisplay = allCombos.map((combo, i) => ({
-      selections: combo.map(s => s.name),
-      combinedOdds: comboOdds[i],
-      potentialGain: stake * comboOdds[i],
-    }));
 
     return {
+      ...combo,
+      stakePerCombo,
       totalStake,
-      maxGain,
-      minGain,
-      combosCount: selectedSystem.combinations,
-      combosDisplay,
+      potentialGains: {
+        min: parseFloat(minGain.toFixed(2)),
+        max: parseFloat(maxGain.toFixed(2)),
+      }
     };
-  }, [selections, selectedSystem, stakePerCombo]);
-
-  const addSelection = () => {
-    const odds = parseFloat(newSelection.odds);
-    if (!newSelection.name || !newSelection.match || isNaN(odds) || odds <= 1) {
-      toast.error("Veuillez remplir tous les champs correctement");
-      return;
-    }
-
-    const newSel: SystemSelection = {
-      id: `sel-${Date.now()}`,
-      name: newSelection.name,
-      match: newSelection.match,
-      odds,
-      type: newSelection.type,
-      status: 'pending',
-    };
-
-    setSelections(prev => [...prev, newSel]);
-    setNewSelection({ name: "", match: "", odds: "", type: "player" });
-    toast.success(`${newSel.name} ajouté au système`);
   };
 
-  const removeSelection = (id: string) => {
-    setSelections(prev => prev.filter(s => s.id !== id));
-    if (selections.length - 1 < 2) {
-      setSelectedSystemIndex(0);
-    }
-  };
-
-  const handlePlaceSystemBet = async () => {
-    if (!selectedSystem || !calculation) return;
-
-    setIsPlacing(true);
+  const handlePlaceCombo = async (combo: AIPlayerCombo) => {
+    setIsPlacing(combo.type);
     const today = new Date().toISOString().split('T')[0];
+    const recalcCombo = getRecalculatedCombo(combo);
 
     try {
-      const selectionsStr = selections.map(s => s.name).join(' + ');
-      const systemDetails = `[SYSTÈME ${selectedSystem.required}/${selectedSystem.total}] ${selectionsStr}`;
+      const selectionsStr = combo.selections.map(s => `${s.name} (${s.betType})`).join(' + ');
+      const systemDetails = `[${combo.type}] [SYSTÈME ${combo.systemType}] ${selectionsStr}`;
       
       addBet({
         bet_date: today,
-        match_name: selections.map(s => s.match).join(' | '),
-        bet_type: `SYSTEM_${selectedSystem.required}_${selectedSystem.total}`,
+        match_name: combo.selections.map(s => s.match).join(' | '),
+        bet_type: `SYSTEM_${combo.systemType.replace('/', '_')}`,
         selection: selectionsStr,
-        odds: selections.reduce((acc, s) => acc * s.odds, 1),
-        stake: calculation.totalStake,
-        potential_gain: calculation.maxGain,
+        odds: combo.selections.reduce((acc, s) => acc * s.estimatedOdds, 1),
+        stake: recalcCombo.totalStake,
+        potential_gain: recalcCombo.potentialGains.max,
         outcome: 'pending',
         actual_gain: 0,
-        source: 'manual',
-        notes: `${systemDetails}\n${selectedSystem.combinations} combinaisons @ ${stakePerCombo}€/combo\nCotes: ${selections.map(s => `${s.name} @${s.odds}`).join(' • ')}`,
+        source: 'ai_suggestion',
+        notes: `${systemDetails}\n${combo.combinationsCount} combinaisons @ ${recalcCombo.stakePerCombo.toFixed(2)}€/combo\nJoueurs: ${combo.selections.map(s => `${s.name} @${s.estimatedOdds} - ${s.reason}`).join('\n')}\nConfiance IA: ${combo.confidence}%`,
       });
 
       toast.success(
         <div className="flex flex-col gap-1">
-          <span className="font-semibold">Système {selectedSystem.required}/{selectedSystem.total} placé ! 🎰</span>
-          <span className="text-sm opacity-80">{selectionsStr}</span>
+          <span className="font-semibold">{combo.name} placé ! 🎰</span>
+          <span className="text-sm opacity-80">{combo.selections.length} joueurs • {recalcCombo.totalStake.toFixed(2)}€</span>
         </div>
       );
-
-      setSelections([]);
-      setSelectedSystemIndex(0);
-      setStakePerCombo("0.25");
       
       if (onClose) onClose();
     } catch (err) {
-      console.error('Error placing system bet:', err);
-      toast.error('Erreur lors du placement du système');
+      console.error('Error placing combo:', err);
+      toast.error('Erreur lors du placement du combo');
     } finally {
-      setIsPlacing(false);
+      setIsPlacing(null);
     }
   };
 
@@ -310,12 +220,49 @@ export function SystemBetBuilder({ onClose }: SystemBetBuilderProps) {
     }
   };
 
-  const getTypeColor = (type: string) => {
+  const getTypeStyles = (type: string) => {
     switch (type) {
-      case 'SAFE': return 'bg-success/20 text-success border-success/30';
-      case 'FUN': return 'bg-warning/20 text-warning border-warning/30';
-      case 'SUPER_COMBO': return 'bg-accent/20 text-accent border-accent/30';
-      default: return 'bg-muted text-muted-foreground';
+      case 'SAFE': 
+        return {
+          bg: 'bg-success/10',
+          border: 'border-success/30',
+          text: 'text-success',
+          badge: 'bg-success/20 text-success border-success/30',
+          gradient: 'from-success/20 to-success/5',
+        };
+      case 'FUN': 
+        return {
+          bg: 'bg-warning/10',
+          border: 'border-warning/30',
+          text: 'text-warning',
+          badge: 'bg-warning/20 text-warning border-warning/30',
+          gradient: 'from-warning/20 to-warning/5',
+        };
+      case 'SUPER_COMBO': 
+        return {
+          bg: 'bg-accent/10',
+          border: 'border-accent/30',
+          text: 'text-accent',
+          badge: 'bg-accent/20 text-accent border-accent/30',
+          gradient: 'from-accent/20 to-accent/5',
+        };
+      default: 
+        return {
+          bg: 'bg-muted',
+          border: 'border-border',
+          text: 'text-muted-foreground',
+          badge: 'bg-muted text-muted-foreground',
+          gradient: 'from-muted to-background',
+        };
+    }
+  };
+
+  const getTypeLabel = (type: string) => {
+    switch (type) {
+      case 'SAFE': return 'Récupération mise';
+      case 'FUN': return 'Équilibre risque/gain';
+      case 'SUPER_COMBO': return 'Gros gains';
+      default: return '';
     }
   };
 
@@ -328,13 +275,13 @@ export function SystemBetBuilder({ onClose }: SystemBetBuilderProps) {
           </div>
           <div>
             <h3 className="font-semibold flex items-center gap-2">
-              Super Combo IA
+              Super Combo IA - Joueurs
               <Badge className="bg-accent/20 text-accent border-accent/30 border text-xs">
-                Suggestions Auto
+                100% Auto
               </Badge>
             </h3>
             <p className="text-xs text-muted-foreground">
-              L'IA analyse les matchs et propose des combinaisons optimales
+              L'IA analyse et propose 3 combinaisons joueurs optimales
             </p>
           </div>
         </div>
@@ -358,7 +305,7 @@ export function SystemBetBuilder({ onClose }: SystemBetBuilderProps) {
       </div>
 
       {/* AI Analysis Summary */}
-      {aiAnalysis && (
+      {aiAnalysis && !isLoadingAI && (
         <div className="p-4 rounded-lg bg-primary/5 border border-primary/20 mb-6">
           <div className="flex items-start gap-2">
             <Brain className="w-5 h-5 text-primary mt-0.5" />
@@ -375,10 +322,13 @@ export function SystemBetBuilder({ onClose }: SystemBetBuilderProps) {
         <div className="space-y-4 mb-6">
           <div className="flex items-center gap-3 p-4 rounded-lg bg-secondary/50">
             <Loader2 className="w-5 h-5 animate-spin text-primary" />
-            <span className="text-sm">L'IA analyse les matchs de ce soir...</span>
+            <span className="text-sm">L'IA analyse les joueurs en forme et l'historique...</span>
           </div>
-          <Skeleton className="h-32 w-full" />
-          <Skeleton className="h-32 w-full" />
+          <div className="grid gap-4 md:grid-cols-3">
+            <Skeleton className="h-64 w-full" />
+            <Skeleton className="h-64 w-full" />
+            <Skeleton className="h-64 w-full" />
+          </div>
         </div>
       )}
 
@@ -397,321 +347,185 @@ export function SystemBetBuilder({ onClose }: SystemBetBuilderProps) {
         </div>
       )}
 
-      {/* AI Suggestions */}
-      {!isLoadingAI && aiSuggestions.length > 0 && (
-        <div className="mb-6">
-          <h4 className="text-sm font-medium mb-3 flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-accent" />
-            Combinaisons suggérées par l'IA
-          </h4>
-          <div className="grid gap-4 md:grid-cols-3">
-            {aiSuggestions.map((combo, index) => {
-              const TypeIcon = getTypeIcon(combo.type);
-              return (
-                <div 
-                  key={index}
-                  className={`p-4 rounded-lg border-2 cursor-pointer transition-all hover:ring-2 hover:ring-primary/20 ${getTypeColor(combo.type)}`}
-                  onClick={() => loadAISuggestion(combo)}
-                >
-                  <div className="flex items-center justify-between mb-3">
+      {/* 3 AI Combo Cards */}
+      {!isLoadingAI && aiCombos.length > 0 && (
+        <div className="grid gap-4 md:grid-cols-3">
+          {aiCombos.map((combo) => {
+            const TypeIcon = getTypeIcon(combo.type);
+            const styles = getTypeStyles(combo.type);
+            const recalcCombo = getRecalculatedCombo(combo);
+            
+            return (
+              <div 
+                key={combo.type}
+                className={`rounded-xl border-2 ${styles.border} ${styles.bg} overflow-hidden transition-all hover:ring-2 hover:ring-primary/20`}
+              >
+                {/* Header */}
+                <div className={`p-4 bg-gradient-to-r ${styles.gradient}`}>
+                  <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
-                      <TypeIcon className="w-5 h-5" />
-                      <span className="font-semibold text-sm">{combo.name}</span>
+                      <TypeIcon className={`w-5 h-5 ${styles.text}`} />
+                      <span className={`font-bold ${styles.text}`}>
+                        {combo.type === 'SUPER_COMBO' ? 'SUPER' : combo.type}
+                      </span>
                     </div>
-                    <Badge variant="outline" className="text-xs font-mono">
-                      {combo.systemType}
+                    <Badge variant="outline" className={`font-mono text-xs ${styles.badge}`}>
+                      Système {combo.systemType}
                     </Badge>
                   </div>
+                  <p className="text-xs text-muted-foreground">{getTypeLabel(combo.type)}</p>
+                </div>
 
-                  <div className="space-y-2 mb-3">
-                    {combo.selections.map((sel, i) => (
-                      <div key={i} className="flex items-center justify-between text-xs">
-                        <span className="truncate flex-1">{sel.name}</span>
-                        <Badge variant="secondary" className="font-mono ml-2">
+                {/* Selections */}
+                <div className="p-4 space-y-2">
+                  {combo.selections.map((sel, i) => (
+                    <div 
+                      key={i}
+                      className="p-2 rounded-lg bg-background/50 border border-border/50"
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <div className={`w-5 h-5 rounded-full ${styles.bg} flex items-center justify-center text-xs font-bold ${styles.text}`}>
+                            {i + 1}
+                          </div>
+                          <span className="font-medium text-sm truncate max-w-[120px]">{sel.name}</span>
+                        </div>
+                        <Badge variant="secondary" className="font-mono text-xs">
                           @{sel.estimatedOdds.toFixed(2)}
                         </Badge>
                       </div>
-                    ))}
-                  </div>
-
-                  <div className="flex items-center justify-between pt-2 border-t border-current/20">
-                    <div>
-                      <p className="text-xs opacity-70">Cote combinée</p>
-                      <p className="font-mono font-bold">@{combo.combinedOdds.toFixed(2)}</p>
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground ml-7">
+                        <Badge variant="outline" className="text-[10px] px-1.5">
+                          {sel.betType}
+                        </Badge>
+                        <span className="truncate">{sel.match}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1 ml-7 italic line-clamp-1">
+                        {sel.reason}
+                      </p>
                     </div>
-                    <div className="text-right">
-                      <p className="text-xs opacity-70">Confiance</p>
-                      <p className="font-bold">{combo.confidence}%</p>
-                    </div>
-                  </div>
-
-                  <p className="text-xs opacity-70 mt-2 italic line-clamp-2">
-                    {combo.reasoning}
-                  </p>
-
-                  <Button 
-                    size="sm" 
-                    variant="secondary" 
-                    className="w-full mt-3 gap-2"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      loadAISuggestion(combo);
-                    }}
-                  >
-                    <Check className="w-4 h-4" />
-                    Utiliser cette combinaison
-                  </Button>
+                  ))}
                 </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
-      {/* Manual Add Selection (collapsed by default when AI suggestions exist) */}
-      {(aiSuggestions.length === 0 || selections.length > 0) && (
-        <details className={`mb-6 ${aiSuggestions.length > 0 ? '' : 'open'}`} open={aiSuggestions.length === 0}>
-          <summary className="cursor-pointer text-sm font-medium mb-3 flex items-center gap-2 hover:text-primary transition-colors">
-            <Plus className="w-4 h-4" />
-            Ajouter manuellement une sélection
-          </summary>
-          <div className="p-4 rounded-lg bg-secondary/30 border border-border/50">
-            <div className="grid gap-3 md:grid-cols-4">
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Joueur / Équipe</label>
-                <Input
-                  placeholder="Ex: Nikita Kucherov"
-                  value={newSelection.name}
-                  onChange={(e) => setNewSelection(prev => ({ ...prev, name: e.target.value }))}
-                  className="h-9"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Match</label>
-                <Input
-                  placeholder="Ex: TBL vs BOS"
-                  value={newSelection.match}
-                  onChange={(e) => setNewSelection(prev => ({ ...prev, match: e.target.value }))}
-                  className="h-9"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Cote</label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  min="1.01"
-                  placeholder="3.50"
-                  value={newSelection.odds}
-                  onChange={(e) => setNewSelection(prev => ({ ...prev, odds: e.target.value }))}
-                  className="h-9 font-mono"
-                />
-              </div>
-              <div className="flex items-end">
-                <Button onClick={addSelection} size="sm" className="w-full h-9 gap-2">
-                  <Plus className="w-4 h-4" />
-                  Ajouter
-                </Button>
-              </div>
-            </div>
-          </div>
-        </details>
-      )}
+                {/* SAFE Recovery Indicator */}
+                {combo.type === 'SAFE' && combo.minRecoveryPercent && (
+                  <div className="px-4 pb-2">
+                    <div className="p-2 rounded-lg bg-success/10 border border-success/20 flex items-center gap-2">
+                      <Shield className="w-4 h-4 text-success" />
+                      <p className="text-xs text-success font-medium">
+                        Si {combo.systemType.split('/')[0]} joueurs passent: récup ~{combo.minRecoveryPercent}% mise
+                      </p>
+                    </div>
+                  </div>
+                )}
 
-      {/* Current selections */}
-      {selections.length > 0 && (
-        <div className="mb-6">
-          <h4 className="text-sm font-medium mb-3 flex items-center gap-2">
-            <Users className="w-4 h-4" />
-            Mes sélections ({selections.length})
-          </h4>
-          <div className="space-y-2">
-            {selections.map((sel, i) => (
-              <div 
-                key={sel.id}
-                className="flex items-center justify-between p-3 rounded-lg border border-border/50 bg-card/50"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold text-primary">
-                    {i + 1}
+                {/* Stake Editor */}
+                <div className="px-4 pb-2">
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-muted-foreground whitespace-nowrap">Mise/combo:</label>
+                    <Input
+                      type="number"
+                      step="0.10"
+                      min="0.10"
+                      value={editableStakes[combo.type] || combo.stakePerCombo}
+                      onChange={(e) => setEditableStakes(prev => ({
+                        ...prev,
+                        [combo.type]: parseFloat(e.target.value) || 0.50
+                      }))}
+                      className="h-7 w-20 font-mono text-sm"
+                    />
+                    <span className="text-xs text-muted-foreground">€</span>
+                  </div>
+                </div>
+
+                {/* Stats */}
+                <div className="p-4 pt-2 grid grid-cols-3 gap-2 text-center">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Combinaisons</p>
+                    <p className="font-mono font-bold">{combo.combinationsCount}</p>
                   </div>
                   <div>
-                    <p className="font-medium text-sm">{sel.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {sel.match}
-                      {sel.reason && <span className="ml-2 italic">— {sel.reason}</span>}
+                    <p className="text-xs text-muted-foreground">Mise totale</p>
+                    <p className="font-mono font-bold">{recalcCombo.totalStake.toFixed(2)}€</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Confiance</p>
+                    <p className={`font-bold ${combo.confidence >= 70 ? 'text-success' : combo.confidence >= 50 ? 'text-warning' : 'text-muted-foreground'}`}>
+                      {combo.confidence}%
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <Badge variant="outline" className="font-mono">
-                    @{sel.odds.toFixed(2)}
-                  </Badge>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => removeSelection(sel.id)}
-                    className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+
+                {/* Potential Gains */}
+                <div className="px-4 pb-4">
+                  <div className={`p-3 rounded-lg bg-gradient-to-r ${styles.gradient} border ${styles.border}`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-1.5">
+                        <TrendingUp className="w-4 h-4 text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground">Gains potentiels</span>
+                      </div>
+                      <Trophy className={`w-4 h-4 ${styles.text}`} />
+                    </div>
+                    <div className="flex items-end justify-between">
+                      <div>
+                        <p className="text-xs text-muted-foreground">Min ({combo.systemType.split('/')[0]} gagnants)</p>
+                        <p className="font-mono font-bold text-lg">{recalcCombo.potentialGains.min.toFixed(2)}€</p>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                      <div className="text-right">
+                        <p className="text-xs text-muted-foreground">Max (tous gagnants)</p>
+                        <p className={`font-mono font-bold text-lg ${styles.text}`}>{recalcCombo.potentialGains.max.toFixed(2)}€</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Reasoning */}
+                <div className="px-4 pb-4">
+                  <p className="text-xs text-muted-foreground italic line-clamp-2">
+                    💡 {combo.reasoning}
+                  </p>
+                </div>
+
+                {/* Place Button */}
+                <div className="p-4 pt-0">
+                  <Button 
+                    onClick={() => handlePlaceCombo(combo)}
+                    disabled={isPlacing === combo.type || isUpdating}
+                    className={`w-full gap-2 ${combo.type === 'SAFE' ? 'bg-success hover:bg-success/90' : combo.type === 'FUN' ? 'bg-warning hover:bg-warning/90 text-warning-foreground' : 'bg-accent hover:bg-accent/90'}`}
                   >
-                    <X className="w-4 h-4" />
+                    {isPlacing === combo.type ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Placement...
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-4 h-4" />
+                        Placer ({recalcCombo.totalStake.toFixed(2)}€)
+                      </>
+                    )}
                   </Button>
                 </div>
               </div>
-            ))}
-          </div>
+            );
+          })}
         </div>
       )}
 
-      {/* System type selector */}
-      {selections.length >= 2 && (
-        <div className="mb-6">
-          <h4 className="text-sm font-medium mb-3 flex items-center gap-2">
-            <Calculator className="w-4 h-4" />
-            Type de système
-          </h4>
-          <div className="flex flex-wrap gap-2">
-            {availableSystems.map((sys, index) => (
-              <Button
-                key={sys.name}
-                variant={selectedSystemIndex === index ? "default" : "outline"}
-                size="sm"
-                onClick={() => setSelectedSystemIndex(index)}
-                className="gap-2"
-              >
-                {sys.name}
-                <Badge 
-                  variant="secondary" 
-                  className={`text-xs ${selectedSystemIndex === index ? 'bg-primary-foreground/20' : ''}`}
-                >
-                  {sys.combinations} combis
-                </Badge>
-              </Button>
-            ))}
-          </div>
+      {/* No combos */}
+      {!isLoadingAI && aiCombos.length === 0 && !aiError && (
+        <div className="p-8 rounded-lg bg-muted/50 border border-border/50 text-center">
+          <Users className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+          <h4 className="font-medium mb-2">Aucune combinaison disponible</h4>
+          <p className="text-sm text-muted-foreground mb-4">
+            Pas de matchs ce soir ou données insuffisantes pour générer des suggestions.
+          </p>
+          <Button variant="outline" onClick={fetchAISuggestions}>
+            <RefreshCw className="w-4 h-4 mr-2" />
+            Réessayer
+          </Button>
         </div>
-      )}
-
-      {/* Stake input */}
-      {selectedSystem && (
-        <div className="mb-6">
-          <h4 className="text-sm font-medium mb-3 flex items-center gap-2">
-            <DollarSign className="w-4 h-4" />
-            Mise par combinaison
-          </h4>
-          <div className="flex items-center gap-4">
-            <div className="flex-1 max-w-xs">
-              <Input
-                type="number"
-                step="0.25"
-                min="0.10"
-                placeholder="0.25"
-                value={stakePerCombo}
-                onChange={(e) => setStakePerCombo(e.target.value)}
-                className="h-10 font-mono text-lg"
-              />
-            </div>
-            <div className="flex gap-2">
-              {[0.25, 0.50, 1.00].map(val => (
-                <Button
-                  key={val}
-                  variant={stakePerCombo === val.toFixed(2) ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setStakePerCombo(val.toFixed(2))}
-                >
-                  {val.toFixed(2)}€
-                </Button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Calculation summary */}
-      {calculation && (
-        <div className="p-4 rounded-lg bg-gradient-to-br from-success/10 to-primary/10 border border-success/30 mb-6">
-          <div className="flex items-center gap-2 mb-4">
-            <Sparkles className="w-5 h-5 text-success" />
-            <span className="font-semibold">Récapitulatif</span>
-          </div>
-          
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-            <div>
-              <p className="text-xs text-muted-foreground">Combinaisons</p>
-              <p className="font-mono font-bold text-lg">{calculation.combosCount}</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">Mise totale</p>
-              <p className="font-mono font-bold text-lg">{calculation.totalStake.toFixed(2)}€</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">Gain min ({selectedSystem?.required} gagnants)</p>
-              <p className="font-mono font-bold text-lg text-warning">{calculation.minGain.toFixed(2)}€</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">Gain max (tout gagné)</p>
-              <p className="font-mono font-bold text-lg text-success">{calculation.maxGain.toFixed(2)}€</p>
-            </div>
-          </div>
-
-          <details className="cursor-pointer">
-            <summary className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-              Voir les {calculation.combosCount} combinaisons
-            </summary>
-            <div className="mt-3 space-y-2 max-h-48 overflow-y-auto">
-              {calculation.combosDisplay.map((combo, i) => (
-                <div 
-                  key={i} 
-                  className="flex items-center justify-between p-2 rounded bg-secondary/30 text-sm"
-                >
-                  <span className="text-muted-foreground">
-                    {combo.selections.join(' + ')}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs">@{combo.combinedOdds.toFixed(2)}</span>
-                    <span className="font-mono text-success">→ {combo.potentialGain.toFixed(2)}€</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </details>
-        </div>
-      )}
-
-      {/* Info box when no selections */}
-      {selections.length < 2 && !isLoadingAI && aiSuggestions.length === 0 && (
-        <div className="p-4 rounded-lg bg-muted/50 border border-border/50 mb-6 flex items-start gap-3">
-          <Info className="w-5 h-5 text-muted-foreground mt-0.5" />
-          <div>
-            <p className="text-sm text-muted-foreground">
-              L'IA va analyser les matchs de ce soir et proposer des combinaisons optimales.
-            </p>
-            <p className="text-xs text-muted-foreground mt-1">
-              Vous pouvez aussi ajouter manuellement vos propres sélections.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Place bet button */}
-      {calculation && (
-        <Button
-          onClick={handlePlaceSystemBet}
-          disabled={isPlacing || isUpdating}
-          size="lg"
-          className="w-full gap-2"
-        >
-          {isPlacing ? (
-            <>
-              <Loader2 className="w-5 h-5 animate-spin" />
-              Placement...
-            </>
-          ) : (
-            <>
-              <Check className="w-5 h-5" />
-              Placer le Système {selectedSystem?.name} ({calculation.totalStake.toFixed(2)}€)
-            </>
-          )}
-        </Button>
       )}
     </Card>
   );
