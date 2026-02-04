@@ -7,6 +7,7 @@ import { HotPlayers } from "@/components/dashboard/HotPlayers";
 import { ValueAlerts } from "@/components/dashboard/ValueAlerts";
 import { NightAnalysis } from "@/components/dashboard/NightAnalysis";
 import { SystemStatus } from "@/components/dashboard/SystemStatus";
+import { AIPicksPanel } from "@/components/dashboard/AIPicksPanel";
 import { Match, BadgeType, PredictionStats } from "@/types/nhl";
 import { useNHLData } from "@/hooks/useNHLData";
 import { Users, Target, TrendingUp, Zap, Loader2 } from "lucide-react";
@@ -220,10 +221,13 @@ const Index = () => {
               />
             </div>
 
+            {/* AI Picks - Full Width */}
+            <AIPicksPanel />
+
             {/* Main Grid */}
             <div className="grid lg:grid-cols-3 gap-6">
               {/* Left Column - Matches */}
-            <div className="lg:col-span-2 space-y-6">
+              <div className="lg:col-span-2 space-y-6">
                 {/* Night Analysis - Top 3 matches */}
                 <NightAnalysis matches={displayAnalyzedMatches} />
                 
