@@ -27,17 +27,43 @@ serve(async (req) => {
     const parisTime = new Date().toLocaleString('en-US', { timeZone: 'Europe/Paris' });
     const now = new Date(parisTime);
     const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    
+    // Get season start (October 1st of current season)
+    const seasonStart = now.getMonth() >= 9 
+      ? `${now.getFullYear()}-10-01` 
+      : `${now.getFullYear() - 1}-10-01`;
 
     // Fetch recent player stats (last 5 days)
     const { data: playerStats, error: statsError } = await supabase
       .from('player_stats')
-      .select('scorer, team_abbr, situation, duo, game_date')
+      .select('scorer, team_abbr, situation, duo, game_date, match_name')
       .gte('game_date', fiveDaysAgo)
       .order('game_date', { ascending: false });
 
     if (statsError) {
       console.error('Error fetching player stats:', statsError);
       throw statsError;
+    }
+
+    // Fetch season stats for historical goals against opponents
+    const { data: seasonStats } = await supabase
+      .from('player_stats')
+      .select('scorer, team_abbr, match_name')
+      .gte('game_date', seasonStart);
+
+    // Build historical goals map: player -> opponent -> goals count
+    const historicalGoals = new Map<string, Map<string, number>>();
+    for (const stat of seasonStats || []) {
+      const playerKey = stat.scorer.toLowerCase();
+      // Extract opponent from match_name (e.g., "TOR vs MTL" or "MTL @ TOR")
+      const matchParts = stat.match_name.split(/\s+vs\s+|\s+@\s+/i);
+      const opponent = matchParts.find((t: string) => t !== stat.team_abbr) || '';
+      
+      if (!historicalGoals.has(playerKey)) {
+        historicalGoals.set(playerKey, new Map());
+      }
+      const playerHistory = historicalGoals.get(playerKey)!;
+      playerHistory.set(opponent, (playerHistory.get(opponent) || 0) + 1);
     }
 
     // Aggregate player performance
@@ -112,40 +138,83 @@ serve(async (req) => {
 
     const teamMetaMap = new Map(teamMeta?.map(t => [t.team_abbr, t]) || []);
 
-    // Build context for AI
+    // Get upcoming matches for context
+    const upcomingMatches = Array.from(new Set(
+      currentOdds?.map(o => o.match_name) || []
+    )).slice(0, 10);
+
+    // Parse match info to determine opponents
+    const matchOpponents = new Map<string, { opponent: string; opponentB2B: boolean; opponentPIM: number }>();
+    for (const matchName of upcomingMatches) {
+      const parts = matchName.split(/\s+vs\s+|\s+@\s+/i);
+      if (parts.length === 2) {
+        const [team1, team2] = parts;
+        const team1Meta = teamMetaMap.get(team1);
+        const team2Meta = teamMetaMap.get(team2);
+        matchOpponents.set(team1, { 
+          opponent: team2, 
+          opponentB2B: team2Meta?.is_b2b || false,
+          opponentPIM: team2Meta?.pim_per_game || 0
+        });
+        matchOpponents.set(team2, { 
+          opponent: team1, 
+          opponentB2B: team1Meta?.is_b2b || false,
+          opponentPIM: team1Meta?.pim_per_game || 0
+        });
+      }
+    }
+
+    // Build context for AI with enhanced data
     const hotPlayersWithOdds = topPerformers.map(p => {
       const oddsInfo = oddsMap.get(p.name.toLowerCase());
       const teamInfo = teamMetaMap.get(p.team);
+      const opponentInfo = matchOpponents.get(p.team);
+      const playerHistory = historicalGoals.get(p.name.toLowerCase());
+      const goalsVsOpponent = opponentInfo && playerHistory 
+        ? playerHistory.get(opponentInfo.opponent) || 0 
+        : 0;
+      
       return {
         ...p,
         currentOdds: oddsInfo?.price,
         matchTonight: oddsInfo?.match,
-        opponentB2B: false, // Would need more logic to determine
+        opponent: opponentInfo?.opponent,
+        opponentB2B: opponentInfo?.opponentB2B || false,
+        opponentPIM: opponentInfo?.opponentPIM || 0,
         teamPIM: teamInfo?.pim_per_game,
+        goalsVsOpponent,
       };
-    }).filter(p => p.currentOdds); // Only players with odds available
-
-    // Get upcoming matches for context
-    const upcomingMatches = Array.from(new Set(
-      currentOdds?.map(o => o.match_name) || []
-    )).slice(0, 5);
+    })
+    // Filter: only players with odds >= 1.70 (value bet threshold)
+    .filter(p => p.currentOdds && p.currentOdds >= 1.70);
 
     // Build the prompt for AI analysis
     const analysisPrompt = `Tu es un expert en paris sportifs NHL. Analyse ces données et identifie les 3 meilleures value bets pour les buteurs de ce soir.
 
 ## Joueurs en forme (5 derniers jours):
 ${hotPlayersWithOdds.map(p => 
-  `- ${p.name} (${p.team}): ${p.goals} buts en ${p.gamesPlayed} matchs (${p.goalsPerGame}/match), ${p.ppGoals} en PP. Cote Winamax: ${p.currentOdds}${p.duo ? `, duo avec ${p.duo}` : ''}`
+  `- ${p.name} (${p.team} vs ${p.opponent || '?'}): ${p.goals} buts en ${p.gamesPlayed} matchs (${p.goalsPerGame}/match), ${p.ppGoals} en PP. Cote: ${p.currentOdds}${p.duo ? `, duo avec ${p.duo}` : ''}${p.opponentB2B ? ' 🔋 ADVERSAIRE EN B2B' : ''}${p.opponentPIM > 8 ? ` 🔴 PIM adversaire: ${p.opponentPIM.toFixed(1)}/G` : ''}${p.goalsVsOpponent > 0 ? ` ⚡ ${p.goalsVsOpponent} but(s) vs ${p.opponent} cette saison` : ''}`
 ).join('\n')}
 
 ## Matchs de ce soir:
 ${upcomingMatches.join('\n')}
 
-## Règles d'analyse:
-1. Un joueur avec >0.5 but/match et une cote >2.5 est potentiellement une value bet
-2. Les joueurs en PP sont favorisés contre les équipes indisciplinées (>8 PIM/match)
-3. Les duos récurrents augmentent les chances de but
-4. Évite les joueurs dont l'équipe adverse n'est PAS en B2B sauf si très en forme
+## RÈGLES D'ANALYSE STRICTES:
+1. **Indice de fatigue (CRITIQUE)**: Si l'adversaire est en Back-to-Back (🔋), augmente le score de confiance de +15% minimum. C'est un avantage majeur.
+2. **Seuil de cote**: TOUTES les cotes sont déjà >= 1.70. Privilégie les cotes entre 2.00 et 3.50 pour un bon ratio risque/gain.
+3. **Historique vs adversaire**: Si un joueur a déjà marqué contre cet adversaire cette saison (⚡), mentionne-le OBLIGATOIREMENT dans le reasoning.
+4. Un joueur avec >0.5 but/match et une cote >2.5 est potentiellement une value bet
+5. Les joueurs en PP sont favorisés contre les équipes indisciplinées (>8 PIM/match 🔴)
+6. Les duos récurrents augmentent les chances de but
+
+## CALCUL DU SCORE DE CONFIANCE:
+- Base: 50%
+- +15% si adversaire en B2B
+- +10% si >0.6 but/match sur les 5 derniers matchs
+- +10% si adversaire >8 PIM/G
+- +5% si duo performant identifié
+- +5% si historique positif vs cet adversaire
+- Max: 95%
 
 Réponds en JSON avec exactement ce format:
 {
@@ -156,7 +225,7 @@ Réponds en JSON avec exactement ce format:
       "match": "TEAM1 vs TEAM2",
       "odds": 2.50,
       "confidence": 75,
-      "reasoning": "Explication courte en français"
+      "reasoning": "Explication courte en français incluant les facteurs clés (B2B, historique, PP...)"
     }
   ],
   "analysis_summary": "Résumé de l'analyse en 2-3 phrases"
