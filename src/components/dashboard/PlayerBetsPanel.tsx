@@ -145,10 +145,46 @@ export function PlayerBetsPanel() {
         playerStatsMap.set(key, existing);
       });
 
+      // Normalize player name (remove initials like "K." if full name exists)
+      const normalizedPlayers = new Map<string, { goals: number; ppGoals: number; team: string; games: Set<string> }>();
+      playerStatsMap.forEach((playerStats, playerName) => {
+        // Check if it's an abbreviated name (e.g., "K. Kaprizov")
+        const abbreviated = playerName.match(/^[A-Z]\.\s+(.+)$/);
+        if (abbreviated) {
+          const lastName = abbreviated[1];
+          // Check if a full name with same last name exists
+          let foundFull = false;
+          playerStatsMap.forEach((_, fullName) => {
+            if (fullName !== playerName && fullName.endsWith(lastName) && !fullName.match(/^[A-Z]\.\s/)) {
+              // Merge stats into the full name version
+              const existing = normalizedPlayers.get(fullName);
+              if (existing) {
+                existing.goals += playerStats.goals;
+                existing.ppGoals += playerStats.ppGoals;
+                playerStats.games.forEach(g => existing.games.add(g));
+              }
+              foundFull = true;
+            }
+          });
+          if (!foundFull) {
+            normalizedPlayers.set(playerName, { ...playerStats, games: new Set(playerStats.games) });
+          }
+        } else {
+          const existing = normalizedPlayers.get(playerName);
+          if (existing) {
+            existing.goals += playerStats.goals;
+            existing.ppGoals += playerStats.ppGoals;
+            playerStats.games.forEach(g => existing.games.add(g));
+          } else {
+            normalizedPlayers.set(playerName, { ...playerStats, games: new Set(playerStats.games) });
+          }
+        }
+      });
+
       // Build player suggestions
       const suggestions: PlayerSuggestion[] = [];
       
-      playerStatsMap.forEach((stats, playerName) => {
+      normalizedPlayers.forEach((stats, playerName) => {
         if (!tonightTeams.has(stats.team)) return;
         
         const matchInfo = tonightMatches[stats.team];
@@ -190,10 +226,6 @@ export function PlayerBetsPanel() {
 
         confidence = Math.min(confidence, 95);
 
-        let category: 'SAFE' | 'FUN' | 'SUPER_COMBO' = 'FUN';
-        if (confidence >= 80) category = 'SAFE';
-        else if (confidence < 60) category = 'SUPER_COMBO';
-
         suggestions.push({
           id: `player-${playerName.replace(/\s+/g, '-').toLowerCase()}`,
           name: playerName,
@@ -204,12 +236,21 @@ export function PlayerBetsPanel() {
           ppGoals: stats.ppGoals,
           confidence,
           reasoning: reasons.join(' • ') || 'Actif récemment',
-          category,
+          category: 'SAFE', // Temporary, will be assigned after sorting
           learningBoost: playerBoost,
         });
       });
 
+      // Sort by confidence and assign categories properly
       suggestions.sort((a, b) => b.confidence - a.confidence);
+      
+      // Assign categories: Top 3 SAFE, Next 3 FUN, Rest SUPER_COMBO
+      suggestions.forEach((p, idx) => {
+        if (idx < 3) p.category = 'SAFE';
+        else if (idx < 6) p.category = 'FUN';
+        else p.category = 'SUPER_COMBO';
+      });
+      
       setPlayers(suggestions.slice(0, 12));
       toast.success('Suggestions joueurs mises à jour');
     } catch (err) {
@@ -238,13 +279,14 @@ export function PlayerBetsPanel() {
     }).filter((p): p is NonNullable<typeof p> => p !== null);
   }, [players, oddsInputs]);
 
-  // Super Combo: système sur les joueurs avec cotes saisies
+  // Super Combo: système sur les joueurs avec cotes saisies (minimum 2)
   const superCombo = useMemo<SuperComboPlayer | null>(() => {
-    if (playersWithOdds.length < 4) return null;
+    if (playersWithOdds.length < 2) return null;
     
-    const selections = playersWithOdds.slice(0, 5); // Max 5
+    const selections = playersWithOdds.slice(0, 6); // Max 6
     const total = selections.length;
-    const required = Math.max(3, total - 1); // Au moins 3 gagnants
+    // Système adaptatif: 2/2, 2/3, 3/4, 3/5, 4/6...
+    const required = total <= 3 ? Math.max(2, total - 1) : Math.max(3, total - 1);
     const systemType = `${required}/${total}`;
     const combosCount = combinations(total, required);
     const totalStake = stakePerCombo * combosCount;
