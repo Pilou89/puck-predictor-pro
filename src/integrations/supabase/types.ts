@@ -14,6 +14,33 @@ export type Database = {
   }
   public: {
     Tables: {
+      bankroll_config: {
+        Row: {
+          created_at: string
+          id: string
+          initial_balance: number
+          monthly_target_percent: number | null
+          unit_percent: number | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          initial_balance?: number
+          monthly_target_percent?: number | null
+          unit_percent?: number | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          initial_balance?: number
+          monthly_target_percent?: number | null
+          unit_percent?: number | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       cron_config: {
         Row: {
           created_at: string | null
@@ -143,6 +170,57 @@ export type Database = {
           team_abbr?: string
           team_name?: string
           updated_at?: string | null
+        }
+        Relationships: []
+      }
+      user_bets: {
+        Row: {
+          actual_gain: number | null
+          bet_date: string
+          bet_type: string
+          created_at: string
+          id: string
+          match_name: string
+          notes: string | null
+          odds: number
+          outcome: string | null
+          potential_gain: number
+          selection: string
+          source: string | null
+          stake: number
+          validated_at: string | null
+        }
+        Insert: {
+          actual_gain?: number | null
+          bet_date?: string
+          bet_type: string
+          created_at?: string
+          id?: string
+          match_name: string
+          notes?: string | null
+          odds: number
+          outcome?: string | null
+          potential_gain: number
+          selection: string
+          source?: string | null
+          stake: number
+          validated_at?: string | null
+        }
+        Update: {
+          actual_gain?: number | null
+          bet_date?: string
+          bet_type?: string
+          created_at?: string
+          id?: string
+          match_name?: string
+          notes?: string | null
+          odds?: number
+          outcome?: string | null
+          potential_gain?: number
+          selection?: string
+          source?: string | null
+          stake?: number
+          validated_at?: string | null
         }
         Relationships: []
       }
