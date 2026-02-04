@@ -7,10 +7,9 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Team mapping for NHL API to abbreviations
+// All 32 NHL teams mapping (abbr -> full name)
 const TEAM_MAPPING: Record<string, string> = {
   "ANA": "Anaheim Ducks",
-  "ARI": "Arizona Coyotes",
   "BOS": "Boston Bruins",
   "BUF": "Buffalo Sabres",
   "CGY": "Calgary Flames",
@@ -44,27 +43,153 @@ const TEAM_MAPPING: Record<string, string> = {
   "WPG": "Winnipeg Jets",
 };
 
-interface Goal {
+interface GoalData {
   scorer: string;
+  scorerTeamAbbr: string;
   assist1?: string;
   assist2?: string;
   situation: string;
   period: number;
+  timeInPeriod: string;
 }
 
-interface GameStats {
+interface GameData {
   gameId: string;
   gameDate: string;
   matchName: string;
   homeTeam: string;
   awayTeam: string;
-  goals: Goal[];
+  homeScore: number;
+  awayScore: number;
+  goals: GoalData[];
   homePim: number;
   awayPim: number;
 }
 
+// Helper to create a unique hash for deduplication
+function createGoalHash(gameDate: string, scorer: string, matchName: string, period: number, situation: string): string {
+  return `${gameDate}_${scorer}_${matchName}_${period}_${situation}`.toLowerCase().replace(/\s+/g, '_');
+}
+
+// Fetch boxscore for a single game
+async function fetchGameBoxscore(gameId: string): Promise<GameData | null> {
+  try {
+    const boxscoreUrl = `https://api-web.nhle.com/v1/gamecenter/${gameId}/boxscore`;
+    const response = await fetch(boxscoreUrl);
+    
+    if (!response.ok) {
+      console.log(`Failed to fetch boxscore for game ${gameId}: ${response.status}`);
+      return null;
+    }
+
+    const boxscore = await response.json();
+    
+    const homeAbbr = boxscore.homeTeam?.abbrev || '';
+    const awayAbbr = boxscore.awayTeam?.abbrev || '';
+    const gameDate = boxscore.gameDate || '';
+    const matchName = `${awayAbbr} @ ${homeAbbr}`;
+    
+    const homeScore = boxscore.homeTeam?.score || 0;
+    const awayScore = boxscore.awayTeam?.score || 0;
+    const homePim = boxscore.homeTeam?.pim || 0;
+    const awayPim = boxscore.awayTeam?.pim || 0;
+
+    // Extract goals from scoring summary
+    const goals: GoalData[] = [];
+    const scoringSummary = boxscore.summary?.scoring || [];
+    
+    for (const period of scoringSummary) {
+      const periodNumber = period.periodDescriptor?.number || 0;
+      
+      for (const goal of period.goals || []) {
+        const scorerFirstName = goal.firstName?.default || '';
+        const scorerLastName = goal.lastName?.default || '';
+        const scorerName = `${scorerFirstName} ${scorerLastName}`.trim();
+        
+        // Determine which team scored based on teamAbbrev in the goal data
+        const scorerTeamAbbr = goal.teamAbbrev?.default || goal.teamAbbrev || '';
+        
+        // Determine situation (EV, PP, SH, EN)
+        let situation = 'EV';
+        if (goal.strength === 'pp') situation = 'PP';
+        else if (goal.strength === 'sh') situation = 'SH';
+        else if (goal.goalType === 'empty-net' || goal.goalType === 'en') situation = 'EN';
+
+        const assists = goal.assists || [];
+        let assist1: string | undefined;
+        let assist2: string | undefined;
+        
+        if (assists.length > 0 && assists[0]) {
+          const a1First = assists[0].firstName?.default || '';
+          const a1Last = assists[0].lastName?.default || '';
+          assist1 = `${a1First} ${a1Last}`.trim() || undefined;
+        }
+        
+        if (assists.length > 1 && assists[1]) {
+          const a2First = assists[1].firstName?.default || '';
+          const a2Last = assists[1].lastName?.default || '';
+          assist2 = `${a2First} ${a2Last}`.trim() || undefined;
+        }
+
+        const timeInPeriod = goal.timeInPeriod || '00:00';
+
+        goals.push({
+          scorer: scorerName,
+          scorerTeamAbbr,
+          assist1,
+          assist2,
+          situation,
+          period: periodNumber,
+          timeInPeriod,
+        });
+      }
+    }
+
+    return {
+      gameId,
+      gameDate,
+      matchName,
+      homeTeam: homeAbbr,
+      awayTeam: awayAbbr,
+      homeScore,
+      awayScore,
+      goals,
+      homePim,
+      awayPim,
+    };
+  } catch (error) {
+    console.error(`Error fetching boxscore for game ${gameId}:`, error);
+    return null;
+  }
+}
+
+// Fetch recent games for a team
+async function fetchTeamRecentGames(teamAbbr: string, numGames: number = 5): Promise<string[]> {
+  try {
+    const scheduleUrl = `https://api-web.nhle.com/v1/club-schedule-season/${teamAbbr}/now`;
+    const response = await fetch(scheduleUrl);
+    
+    if (!response.ok) {
+      console.log(`Failed to fetch schedule for ${teamAbbr}: ${response.status}`);
+      return [];
+    }
+
+    const scheduleData = await response.json();
+    
+    // Filter completed games and get last N game IDs
+    const completedGames = (scheduleData.games || [])
+      .filter((g: { gameState: string }) => g.gameState === 'OFF' || g.gameState === 'FINAL')
+      .slice(-numGames);
+
+    return completedGames.map((g: { id: number }) => g.id.toString());
+  } catch (error) {
+    console.error(`Error fetching schedule for ${teamAbbr}:`, error);
+    return [];
+  }
+}
+
 serve(async (req) => {
-  // Handle CORS
+  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
@@ -74,137 +199,128 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    console.log('Starting NHL stats sync...');
+    console.log('=== Starting NHL Stats Sync ===');
+    const startTime = Date.now();
 
-    // Get list of teams to sync
+    // Collect all unique game IDs from all teams
+    const allGameIds = new Set<string>();
     const teamAbbrs = Object.keys(TEAM_MAPPING);
-    const allStats: GameStats[] = [];
-    const teamPimData: Record<string, { totalPim: number; games: number; lastGameDate: string }> = {};
-
-    // For each team, fetch last 5 games
-    for (const teamAbbr of teamAbbrs) {
-      try {
-        // Fetch team schedule with game results
-        const scheduleUrl = `https://api-web.nhle.com/v1/club-schedule-season/${teamAbbr}/now`;
-        const scheduleRes = await fetch(scheduleUrl);
-        
-        if (!scheduleRes.ok) {
-          console.log(`Failed to fetch schedule for ${teamAbbr}: ${scheduleRes.status}`);
-          continue;
+    
+    console.log(`Fetching schedules for ${teamAbbrs.length} teams...`);
+    
+    // Fetch schedules in batches to avoid rate limiting
+    const batchSize = 8;
+    for (let i = 0; i < teamAbbrs.length; i += batchSize) {
+      const batch = teamAbbrs.slice(i, i + batchSize);
+      const results = await Promise.all(
+        batch.map(abbr => fetchTeamRecentGames(abbr, 5))
+      );
+      
+      for (const gameIds of results) {
+        for (const id of gameIds) {
+          allGameIds.add(id);
         }
-
-        const scheduleData = await scheduleRes.json();
-        
-        // Filter completed games and get last 5
-        const completedGames = scheduleData.games?.filter((g: any) => 
-          g.gameState === 'OFF' || g.gameState === 'FINAL'
-        ).slice(-5) || [];
-
-        for (const game of completedGames) {
-          const gameId = game.id.toString();
-          
-          // Fetch game details for goals
-          const boxscoreUrl = `https://api-web.nhle.com/v1/gamecenter/${gameId}/boxscore`;
-          const boxscoreRes = await fetch(boxscoreUrl);
-          
-          if (!boxscoreRes.ok) {
-            console.log(`Failed to fetch boxscore for game ${gameId}`);
-            continue;
-          }
-
-          const boxscore = await boxscoreRes.json();
-          
-          const homeAbbr = boxscore.homeTeam?.abbrev || '';
-          const awayAbbr = boxscore.awayTeam?.abbrev || '';
-          const matchName = `${awayAbbr} @ ${homeAbbr}`;
-          const gameDate = game.gameDate || boxscore.gameDate;
-
-          // Extract goals from scoring summary
-          const goals: Goal[] = [];
-          const scoringSummary = boxscore.summary?.scoring || [];
-          
-          for (const period of scoringSummary) {
-            for (const goal of period.goals || []) {
-              const scorerName = `${goal.firstName?.default || ''} ${goal.lastName?.default || ''}`.trim();
-              
-              let situation = 'EV';
-              if (goal.strength === 'pp') situation = 'PP';
-              else if (goal.strength === 'sh') situation = 'SH';
-              else if (goal.goalType === 'en') situation = 'EN';
-
-              const assists = goal.assists || [];
-              
-              goals.push({
-                scorer: scorerName,
-                assist1: assists[0] ? `${assists[0].firstName?.default || ''} ${assists[0].lastName?.default || ''}`.trim() : undefined,
-                assist2: assists[1] ? `${assists[1].firstName?.default || ''} ${assists[1].lastName?.default || ''}`.trim() : undefined,
-                situation,
-                period: period.periodDescriptor?.number || 0,
-              });
-            }
-          }
-
-          // Extract PIM data
-          const homePim = boxscore.homeTeam?.pim || 0;
-          const awayPim = boxscore.awayTeam?.pim || 0;
-
-          // Update team PIM tracking
-          if (homeAbbr) {
-            if (!teamPimData[homeAbbr]) {
-              teamPimData[homeAbbr] = { totalPim: 0, games: 0, lastGameDate: '' };
-            }
-            teamPimData[homeAbbr].totalPim += homePim;
-            teamPimData[homeAbbr].games += 1;
-            if (gameDate > teamPimData[homeAbbr].lastGameDate) {
-              teamPimData[homeAbbr].lastGameDate = gameDate;
-            }
-          }
-
-          if (awayAbbr) {
-            if (!teamPimData[awayAbbr]) {
-              teamPimData[awayAbbr] = { totalPim: 0, games: 0, lastGameDate: '' };
-            }
-            teamPimData[awayAbbr].totalPim += awayPim;
-            teamPimData[awayAbbr].games += 1;
-            if (gameDate > teamPimData[awayAbbr].lastGameDate) {
-              teamPimData[awayAbbr].lastGameDate = gameDate;
-            }
-          }
-
-          allStats.push({
-            gameId,
-            gameDate,
-            matchName,
-            homeTeam: homeAbbr,
-            awayTeam: awayAbbr,
-            goals,
-            homePim,
-            awayPim,
-          });
-        }
-      } catch (error) {
-        console.error(`Error processing team ${teamAbbr}:`, error);
+      }
+      
+      // Small delay between batches
+      if (i + batchSize < teamAbbrs.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
 
-    console.log(`Collected stats from ${allStats.length} games`);
+    console.log(`Found ${allGameIds.size} unique games to process`);
 
-    // Insert player stats into database
-    const playerStatsToInsert = [];
-    for (const game of allStats) {
+    // Fetch all game details
+    const gameIdArray = Array.from(allGameIds);
+    const allGames: GameData[] = [];
+    const teamPimData: Record<string, { totalPim: number; games: number; lastGameDate: string }> = {};
+    
+    // Fetch boxscores in batches
+    for (let i = 0; i < gameIdArray.length; i += batchSize) {
+      const batch = gameIdArray.slice(i, i + batchSize);
+      const results = await Promise.all(
+        batch.map(gameId => fetchGameBoxscore(gameId))
+      );
+      
+      for (const game of results) {
+        if (game) {
+          allGames.push(game);
+          
+          // Track PIM data for each team
+          const { homeTeam, awayTeam, homePim, awayPim, gameDate } = game;
+          
+          if (homeTeam) {
+            if (!teamPimData[homeTeam]) {
+              teamPimData[homeTeam] = { totalPim: 0, games: 0, lastGameDate: '' };
+            }
+            teamPimData[homeTeam].totalPim += homePim;
+            teamPimData[homeTeam].games += 1;
+            if (gameDate > teamPimData[homeTeam].lastGameDate) {
+              teamPimData[homeTeam].lastGameDate = gameDate;
+            }
+          }
+          
+          if (awayTeam) {
+            if (!teamPimData[awayTeam]) {
+              teamPimData[awayTeam] = { totalPim: 0, games: 0, lastGameDate: '' };
+            }
+            teamPimData[awayTeam].totalPim += awayPim;
+            teamPimData[awayTeam].games += 1;
+            if (gameDate > teamPimData[awayTeam].lastGameDate) {
+              teamPimData[awayTeam].lastGameDate = gameDate;
+            }
+          }
+        }
+      }
+      
+      // Small delay between batches
+      if (i + batchSize < gameIdArray.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+
+    console.log(`Processed ${allGames.length} games with boxscore data`);
+
+    // Prepare player stats for insertion
+    const playerStatsToInsert: Array<{
+      game_date: string;
+      team_abbr: string;
+      scorer: string;
+      assist1: string | null;
+      assist2: string | null;
+      duo: string | null;
+      situation: string;
+      match_name: string;
+    }> = [];
+    
+    const seenGoals = new Set<string>();
+
+    for (const game of allGames) {
       for (const goal of game.goals) {
-        // Determine which team scored
-        // This is simplified - would need more complex logic in production
-        const teamAbbr = game.homeTeam; // Simplified
+        // Skip if we don't have scorer info
+        if (!goal.scorer || !goal.scorerTeamAbbr) continue;
         
-        const duo = goal.assist1 ? `${goal.scorer}+${goal.assist1}` : undefined;
+        // Create unique hash to prevent duplicates
+        const goalHash = createGoalHash(
+          game.gameDate, 
+          goal.scorer, 
+          game.matchName, 
+          goal.period, 
+          goal.situation
+        );
+        
+        if (seenGoals.has(goalHash)) continue;
+        seenGoals.add(goalHash);
+        
+        // Create duo string if there's a first assist
+        const duo = goal.assist1 ? `${goal.scorer}+${goal.assist1}` : null;
         
         playerStatsToInsert.push({
           game_date: game.gameDate,
-          team_abbr: teamAbbr,
+          team_abbr: goal.scorerTeamAbbr,
           scorer: goal.scorer,
-          assist1: goal.assist1,
-          assist2: goal.assist2,
+          assist1: goal.assist1 || null,
+          assist2: goal.assist2 || null,
           duo,
           situation: goal.situation,
           match_name: game.matchName,
@@ -212,27 +328,39 @@ serve(async (req) => {
       }
     }
 
-    if (playerStatsToInsert.length > 0) {
-      const { error: insertError } = await supabase
+    console.log(`Prepared ${playerStatsToInsert.length} goal records for insertion`);
+
+    // Insert player stats (in batches to avoid payload limits)
+    let insertedCount = 0;
+    const insertBatchSize = 100;
+    
+    for (let i = 0; i < playerStatsToInsert.length; i += insertBatchSize) {
+      const batch = playerStatsToInsert.slice(i, i + insertBatchSize);
+      
+      const { error: insertError, count } = await supabase
         .from('player_stats')
-        .upsert(playerStatsToInsert, { 
+        .upsert(batch, { 
           onConflict: 'id',
           ignoreDuplicates: true 
         });
 
       if (insertError) {
-        console.error('Error inserting player stats:', insertError);
+        console.error(`Error inserting player stats batch ${i}:`, insertError);
       } else {
-        console.log(`Inserted ${playerStatsToInsert.length} player stats`);
+        insertedCount += batch.length;
       }
     }
 
-    // Update team meta with PIM data and B2B detection
+    console.log(`Inserted/updated ${insertedCount} player stats records`);
+
+    // Update team_meta with PIM averages and B2B status
     const today = new Date().toISOString().split('T')[0];
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
+    
+    let teamsUpdated = 0;
+    
     for (const [teamAbbr, data] of Object.entries(teamPimData)) {
-      const pimPerGame = data.games > 0 ? data.totalPim / data.games : 0;
+      const pimPerGame = data.games > 0 ? Math.round((data.totalPim / data.games) * 10) / 10 : 0;
       const isB2B = data.lastGameDate === yesterday || data.lastGameDate === today;
 
       const { error: upsertError } = await supabase
@@ -248,21 +376,31 @@ serve(async (req) => {
 
       if (upsertError) {
         console.error(`Error upserting team meta for ${teamAbbr}:`, upsertError);
+      } else {
+        teamsUpdated++;
       }
     }
 
-    // Update cron config last_run_at
+    console.log(`Updated ${teamsUpdated} team records`);
+
+    // Update cron_config last_run_at
     await supabase
       .from('cron_config')
       .update({ last_run_at: new Date().toISOString() })
       .eq('job_name', 'sync_nhl_stats');
 
+    const duration = Date.now() - startTime;
+    console.log(`=== NHL Stats Sync Complete in ${duration}ms ===`);
+
     return new Response(
       JSON.stringify({
         success: true,
-        gamesProcessed: allStats.length,
-        goalsRecorded: playerStatsToInsert.length,
-        teamsUpdated: Object.keys(teamPimData).length,
+        stats: {
+          gamesProcessed: allGames.length,
+          goalsRecorded: playerStatsToInsert.length,
+          teamsUpdated,
+          durationMs: duration,
+        }
       }),
       { 
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
