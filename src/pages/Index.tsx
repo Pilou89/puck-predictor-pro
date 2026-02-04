@@ -7,10 +7,8 @@ import { HotPlayers } from "@/components/dashboard/HotPlayers";
 import { ValueAlerts } from "@/components/dashboard/ValueAlerts";
 import { NightAnalysis } from "@/components/dashboard/NightAnalysis";
 import { SystemStatus } from "@/components/dashboard/SystemStatus";
-import { TeamPillarPanel } from "@/components/dashboard/TeamPillarPanel";
-import { PlayerPillarPanel } from "@/components/dashboard/PlayerPillarPanel";
-import { StrategicBasketPanel } from "@/components/dashboard/StrategicBasketPanel";
-import { SystemBetBuilder } from "@/components/dashboard/SystemBetBuilder";
+import { TeamBetsPanel } from "@/components/dashboard/TeamBetsPanel";
+import { PlayerBetsPanel } from "@/components/dashboard/PlayerBetsPanel";
 import { BankrollPanel } from "@/components/dashboard/BankrollPanel";
 import { Match, BadgeType, PredictionStats } from "@/types/nhl";
 import { useNHLData } from "@/hooks/useNHLData";
@@ -91,10 +89,8 @@ const Index = () => {
   const [valueAlerts, setValueAlerts] = useState<any[]>([]);
   const [analyzedMatches, setAnalyzedMatches] = useState<any[]>([]);
   
-  // State for pillar selections
-  const [selectedTeamBets, setSelectedTeamBets] = useState<any[]>([]);
-  const [selectedTeamIds, setSelectedTeamIds] = useState<Set<string>>(new Set());
-  const [selectedPlayerBets, setSelectedPlayerBets] = useState<Map<string, any>>(new Map());
+
+  // Update local state when data changes
 
   // Update local state when data changes
   useEffect(() => {
@@ -229,57 +225,10 @@ const Index = () => {
               />
             </div>
 
-            {/* Two Pillars Section */}
+            {/* Two Betting Sections */}
             <div className="grid lg:grid-cols-2 gap-6 mb-6">
-              <TeamPillarPanel 
-                onBetSelect={(bet) => {
-                  setSelectedTeamIds(prev => {
-                    const newSet = new Set(prev);
-                    if (newSet.has(bet.id)) {
-                      newSet.delete(bet.id);
-                      setSelectedTeamBets(bets => bets.filter(b => b.id !== bet.id));
-                    } else {
-                      newSet.add(bet.id);
-                      setSelectedTeamBets(bets => [...bets, bet]);
-                    }
-                    return newSet;
-                  });
-                }}
-                selectedBets={selectedTeamIds}
-              />
-              <PlayerPillarPanel 
-                onBetSelect={(bet) => {
-                  setSelectedPlayerBets(prev => {
-                    const newMap = new Map(prev);
-                    if (bet.manualOdds) {
-                      newMap.set(bet.id, bet);
-                    } else {
-                      newMap.delete(bet.id);
-                    }
-                    return newMap;
-                  });
-                }}
-                selectedBets={selectedPlayerBets}
-                defaultStake={1}
-              />
-            </div>
-
-            {/* Strategic Basket Panel - Full Width */}
-            <div className="mb-6">
-              <StrategicBasketPanel 
-                selectedTeamBets={selectedTeamBets}
-                selectedPlayerBets={Array.from(selectedPlayerBets.values())}
-                onClearSelection={() => {
-                  setSelectedTeamBets([]);
-                  setSelectedTeamIds(new Set());
-                  setSelectedPlayerBets(new Map());
-                }}
-              />
-            </div>
-
-            {/* System Bet Builder */}
-            <div className="mb-6">
-              <SystemBetBuilder />
+              <TeamBetsPanel />
+              <PlayerBetsPanel />
             </div>
 
             {/* Bankroll & Learning - Side by Side */}

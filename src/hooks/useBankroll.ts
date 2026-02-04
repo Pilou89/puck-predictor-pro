@@ -19,7 +19,7 @@ interface UserBet {
   potential_gain: number;
   outcome: 'pending' | 'won' | 'lost' | 'void';
   actual_gain: number;
-  source: 'manual' | 'ai_suggestion';
+  source: string;
   notes?: string;
   created_at: string;
   validated_at?: string;
