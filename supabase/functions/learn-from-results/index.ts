@@ -91,6 +91,19 @@ serve(async (req) => {
         }
       }
 
+      // Player learning - extract player names from selection or notes
+      const playerRegex = /([A-Z][a-z]+(?:\s+[A-Z][a-z'-]+)+)/g;
+      const selectionPlayers = bet.selection.match(playerRegex) || [];
+      const notesPlayers = bet.notes?.match(playerRegex) || [];
+      const allPlayers = [...new Set([...selectionPlayers, ...notesPlayers])];
+      
+      for (const player of allPlayers) {
+        // Skip team names and short matches
+        if (player.length > 4 && !player.includes(' vs ') && !player.includes(' @ ')) {
+          updateMetric('player', player.toLowerCase(), isWin, roiPercent);
+        }
+      }
+
       // Context learning from notes
       if (bet.notes) {
         if (bet.notes.toLowerCase().includes('b2b')) {
@@ -104,18 +117,38 @@ serve(async (req) => {
         }
       }
 
-      // Bet type context
-      if (bet.bet_type === 'SAFE' || bet.notes?.includes('[SAFE]')) {
-        updateMetric('context', 'safe_bets', isWin, roiPercent);
-      }
-      if (bet.bet_type === 'DUO' || bet.notes?.includes('[DUO]')) {
-        updateMetric('context', 'duo_bets', isWin, roiPercent);
-      }
-      if (bet.bet_type === 'FUN' || bet.notes?.includes('[FUN]')) {
-        updateMetric('context', 'fun_bets', isWin, roiPercent);
-      }
-      if (bet.bet_type === 'SUPER_COMBO' || bet.notes?.includes('[SUPER_COMBO]')) {
-        updateMetric('context', 'super_combo_bets', isWin, roiPercent);
+      // System bet type learning (detect from bet_type or notes)
+      const isSystemBet = bet.bet_type?.startsWith('SYSTEM_') || bet.notes?.includes('[SYSTÈME');
+      
+      if (isSystemBet) {
+        // Detect combo type from notes
+        if (bet.notes?.includes('[SAFE]')) {
+          updateMetric('context', 'safe_bets', isWin, roiPercent);
+        } else if (bet.notes?.includes('[FUN]')) {
+          updateMetric('context', 'fun_bets', isWin, roiPercent);
+        } else if (bet.notes?.includes('[SUPER_COMBO]')) {
+          updateMetric('context', 'super_combo_bets', isWin, roiPercent);
+        }
+        
+        // Track system type performance
+        const systemMatch = bet.bet_type?.match(/SYSTEM_(\d+)_(\d+)/);
+        if (systemMatch) {
+          updateMetric('context', `system_${systemMatch[1]}_${systemMatch[2]}`, isWin, roiPercent);
+        }
+      } else {
+        // Non-system bets - original logic
+        if (bet.bet_type === 'SAFE' || bet.notes?.includes('[SAFE]')) {
+          updateMetric('context', 'safe_bets', isWin, roiPercent);
+        }
+        if (bet.bet_type === 'DUO' || bet.notes?.includes('[DUO]')) {
+          updateMetric('context', 'duo_bets', isWin, roiPercent);
+        }
+        if (bet.bet_type === 'FUN' || bet.notes?.includes('[FUN]')) {
+          updateMetric('context', 'fun_bets', isWin, roiPercent);
+        }
+        if (bet.bet_type === 'SUPER_COMBO' || bet.notes?.includes('[SUPER_COMBO]')) {
+          updateMetric('context', 'super_combo_bets', isWin, roiPercent);
+        }
       }
     }
 
