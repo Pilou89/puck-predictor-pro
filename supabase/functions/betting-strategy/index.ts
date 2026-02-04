@@ -81,9 +81,11 @@ serve(async (req) => {
     const parisTime = new Date().toLocaleString('en-US', { timeZone: 'Europe/Paris' });
     const now = new Date(parisTime);
     const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const seasonStart = now.getMonth() >= 9 
-      ? `${now.getFullYear()}-10-01` 
-      : `${now.getFullYear() - 1}-10-01`;
+    const tenDaysAgo = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    
+    // FILTRE TEMPOREL STRICT: Ignorer toutes les données avant le 1er janvier 2026
+    const CUTOFF_DATE = '2026-01-01';
+    const duoStartDate = CUTOFF_DATE;
 
     // Fetch all current odds
     const { data: allOdds, error: oddsError } = await supabase
@@ -98,17 +100,24 @@ serve(async (req) => {
     const goalScorerOdds = allOdds?.filter(o => o.market_type === 'player_anytime_goal_scorer') || [];
     const pointsOdds = allOdds?.filter(o => o.market_type === 'player_points') || [];
 
-    // Fetch player stats
+    // Fetch player stats (last 5 days for performance)
     const { data: playerStats } = await supabase
       .from('player_stats')
       .select('*')
       .gte('game_date', fiveDaysAgo);
 
-    // Fetch season stats for duo data
+    // FILTRE TEMPOREL: Fetch stats depuis le 1er janvier 2026 seulement pour les duos
     const { data: seasonStats } = await supabase
       .from('player_stats')
-      .select('scorer, team_abbr, match_name, duo')
-      .gte('game_date', seasonStart);
+      .select('scorer, team_abbr, match_name, duo, game_date')
+      .gte('game_date', duoStartDate);
+
+    // Fetch ALL recent stats to check player activity (last 10 days)
+    const { data: activityStats } = await supabase
+      .from('player_stats')
+      .select('scorer, game_date')
+      .gte('game_date', tenDaysAgo)
+      .order('game_date', { ascending: false });
 
     // Fetch team metadata
     const { data: teamMeta } = await supabase
@@ -117,12 +126,39 @@ serve(async (req) => {
 
     const teamMetaMap = new Map(teamMeta?.map(t => [t.team_abbr, t]) || []);
 
+    // VÉRIFICATION DE L'EFFECTIF: Construire la map d'activité des joueurs
+    const playerActivity = new Map<string, { lastGameDate: string; gamesLast10Days: number }>();
+    for (const stat of activityStats || []) {
+      const key = stat.scorer.toLowerCase();
+      if (!playerActivity.has(key)) {
+        playerActivity.set(key, { lastGameDate: stat.game_date, gamesLast10Days: 0 });
+      }
+      playerActivity.get(key)!.gamesLast10Days++;
+    }
+
+    // Fonction pour vérifier si un joueur est actif (joué dans les 3 derniers matchs / 10 jours)
+    const isPlayerActive = (playerName: string): boolean => {
+      const activity = playerActivity.get(playerName.toLowerCase());
+      if (!activity) return false; // Pas de données = inactif
+      
+      // Vérifier si le joueur a joué au moins 1 match dans les 10 derniers jours
+      const lastGame = new Date(activity.lastGameDate);
+      const daysSinceLastGame = Math.floor((now.getTime() - lastGame.getTime()) / (1000 * 60 * 60 * 24));
+      
+      // INACTIF si: pas joué depuis 10 jours OU moins de 1 match dans les 10 derniers jours
+      return daysSinceLastGame <= 10 && activity.gamesLast10Days >= 1;
+    };
+
+    console.log(`Player activity check: ${playerActivity.size} players tracked`);
+
     // Aggregate player performance
-    const playerPerf = new Map<string, { goals: number; ppGoals: number; team: string; games: number; duo?: string }>();
+    const playerPerf = new Map<string, { goals: number; ppGoals: number; team: string; games: number; duo?: string; isActive: boolean }>();
     for (const stat of playerStats || []) {
       const key = stat.scorer.toLowerCase();
+      const isActive = isPlayerActive(stat.scorer);
+      
       if (!playerPerf.has(key)) {
-        playerPerf.set(key, { goals: 0, ppGoals: 0, team: stat.team_abbr, games: 0 });
+        playerPerf.set(key, { goals: 0, ppGoals: 0, team: stat.team_abbr, games: 0, isActive });
       }
       const p = playerPerf.get(key)!;
       p.goals++;
@@ -142,21 +178,47 @@ serve(async (req) => {
       if (p) p.games = games.size;
     }
 
-    // Build duo stats from season data
-    const duoStats = new Map<string, { count: number; players: string[] }>();
+    // Build duo stats from season data (SEULEMENT depuis 2026-01-01)
+    // ET vérifier que les deux joueurs du duo sont actifs
+    const duoStats = new Map<string, { count: number; players: string[]; isActive: boolean }>();
     for (const stat of seasonStats || []) {
       if (stat.duo) {
         const duoKey = stat.duo.toLowerCase();
+        const players = stat.duo.split('+').map((p: string) => p.trim());
+        
+        // Vérifier que les deux joueurs sont actifs
+        const bothActive = players.every((p: string) => isPlayerActive(p));
+        
         if (!duoStats.has(duoKey)) {
-          duoStats.set(duoKey, { count: 0, players: stat.duo.split('+') });
+          duoStats.set(duoKey, { count: 0, players, isActive: bothActive });
         }
-        duoStats.get(duoKey)!.count++;
+        const d = duoStats.get(duoKey)!;
+        d.count++;
+        // Mettre à jour le statut actif (si un des deux devient inactif, le duo est inactif)
+        d.isActive = bothActive;
       }
     }
 
-    // Build data for AI prompt
+    // Filtrer les duos inactifs
+    const activeDuos = new Map([...duoStats].filter(([_, d]) => d.isActive));
+    console.log(`Duos: ${duoStats.size} total, ${activeDuos.size} actifs (depuis ${duoStartDate})`);
+    
+    // Log des joueurs inactifs pour debug
+    const inactivePlayers = [...playerActivity.entries()]
+      .filter(([_, a]) => {
+        const lastGame = new Date(a.lastGameDate);
+        const daysSince = Math.floor((now.getTime() - lastGame.getTime()) / (1000 * 60 * 60 * 24));
+        return daysSince > 10 || a.gamesLast10Days < 1;
+      })
+      .map(([name]) => name);
+    if (inactivePlayers.length > 0) {
+      console.log(`Joueurs INACTIFS détectés: ${inactivePlayers.slice(0, 10).join(', ')}${inactivePlayers.length > 10 ? '...' : ''}`);
+    }
+
+    // Build data for AI prompt - FILTRER LES JOUEURS INACTIFS
     const topGoalScorers = goalScorerOdds
       .filter(o => o.price >= 1.70)
+      .filter(o => isPlayerActive(o.selection)) // Exclure les joueurs inactifs
       .slice(0, 20)
       .map(o => {
         const perf = playerPerf.get(o.selection.toLowerCase());
@@ -175,6 +237,7 @@ serve(async (req) => {
           duo: perf?.duo,
           opponentB2B: opponentMeta?.is_b2b || false,
           opponentPIM: opponentMeta?.pim_per_game || 0,
+          isActive: true, // Tous ceux qui passent sont actifs
         };
       });
 
@@ -197,11 +260,14 @@ serve(async (req) => {
         };
       });
 
-    const topDuos = Array.from(duoStats.entries())
-      .filter(([_, d]) => d.count >= 2)
+    // SEULEMENT les duos avec les deux joueurs ACTIFS
+    const topDuos = Array.from(activeDuos.entries())
+      .filter(([_, d]) => d.count >= 2 && d.isActive)
       .sort((a, b) => b[1].count - a[1].count)
       .slice(0, 10)
       .map(([duo, data]) => ({ duo, connections: data.count, players: data.players }));
+
+    console.log(`Données envoyées à l'IA: ${topGoalScorers.length} buteurs actifs, ${topDuos.length} duos actifs`);
 
     // Build prompt for AI
     const basketPrompt = `Tu es un expert en stratégie de paris NHL. Génère LE PANIER DU SOIR avec exactement 3 paris distincts.
