@@ -6,6 +6,7 @@ import { LearningPanel } from "@/components/dashboard/LearningPanel";
 import { HotPlayers } from "@/components/dashboard/HotPlayers";
 import { ValueAlerts } from "@/components/dashboard/ValueAlerts";
 import { NightAnalysis } from "@/components/dashboard/NightAnalysis";
+import { SystemStatus } from "@/components/dashboard/SystemStatus";
 import { Match, BadgeType, PredictionStats } from "@/types/nhl";
 import { useNHLData } from "@/hooks/useNHLData";
 import { Users, Target, TrendingUp, Zap, Loader2 } from "lucide-react";
@@ -72,6 +73,9 @@ const Index = () => {
     topMatches,
     hotPlayers, 
     stats, 
+    cronJobs,
+    lastStatsSync,
+    lastOddsSync,
     lastSync, 
     isLoading, 
     isRefreshing, 
@@ -156,6 +160,14 @@ const Index = () => {
   const displayStats = stats.totalPredictions > 0 ? predictionStats : mockPredictionStats;
   const displayAlerts = valueAlerts.length > 0 ? valueAlerts : mockValueAlerts;
   const displayAnalyzedMatches = analyzedMatches.length > 0 ? analyzedMatches : mockAnalyzedMatches;
+  
+  // Format cron jobs for display
+  const displayCronJobs = cronJobs.length > 0 ? cronJobs.map(job => ({
+    name: job.name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+    schedule: job.schedule,
+    lastRun: job.lastRun ? new Date(job.lastRun) : null,
+    isActive: job.isActive,
+  })) : mockCronJobs;
 
   return (
     <div className="min-h-screen bg-background">
@@ -225,6 +237,12 @@ const Index = () => {
               <div className="space-y-6">
                 <HotPlayers players={displayHotPlayers} />
                 <LearningPanel stats={displayStats} />
+                <SystemStatus 
+                  cronJobs={displayCronJobs}
+                  lastStatsSync={lastStatsSync}
+                  lastOddsSync={lastOddsSync}
+                  isLoading={isRefreshing}
+                />
               </div>
             </div>
 
@@ -393,6 +411,12 @@ const mockValueAlerts = [
     confidence: "medium" as const,
     matchTime: new Date(Date.now() + 5 * 60 * 60 * 1000),
   },
+];
+
+const mockCronJobs = [
+  { name: "Sync NHL Stats", schedule: "08:30 UTC", lastRun: new Date(Date.now() - 2 * 60 * 60 * 1000), isActive: true },
+  { name: "Sync Winamax Odds", schedule: "18:00 UTC", lastRun: new Date(Date.now() - 5 * 60 * 60 * 1000), isActive: true },
+  { name: "Validate Predictions", schedule: "08:30 UTC", lastRun: new Date(Date.now() - 24 * 60 * 60 * 1000), isActive: true },
 ];
 
 export default Index;
