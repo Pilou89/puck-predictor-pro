@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Header } from "@/components/dashboard/Header";
 import { UpcomingMatches } from "@/components/dashboard/UpcomingMatches";
 import { StatsCard } from "@/components/dashboard/StatsCard";
@@ -6,9 +6,227 @@ import { LearningPanel } from "@/components/dashboard/LearningPanel";
 import { HotPlayers } from "@/components/dashboard/HotPlayers";
 import { ValueAlerts } from "@/components/dashboard/ValueAlerts";
 import { Match, BadgeType, PredictionStats } from "@/types/nhl";
-import { Users, Target, TrendingUp, Zap } from "lucide-react";
+import { useNHLData } from "@/hooks/useNHLData";
+import { Users, Target, TrendingUp, Zap, Loader2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
-// Mock data - sera remplacé par les vraies données Supabase
+// Convert API response to app types
+function convertGamesToMatches(games: any[]): Match[] {
+  return games.map(game => ({
+    id: game.id?.toString() || Math.random().toString(),
+    homeTeam: {
+      abbr: game.homeTeam.abbr,
+      name: game.homeTeam.name,
+      isBackToBack: game.homeTeam.isB2B,
+      pimPerGame: game.homeTeam.pimPerGame,
+      recentForm: { wins: 0, losses: 0, otLosses: 0 }, // Would need additional API call
+    },
+    awayTeam: {
+      abbr: game.awayTeam.abbr,
+      name: game.awayTeam.name,
+      isBackToBack: game.awayTeam.isB2B,
+      pimPerGame: game.awayTeam.pimPerGame,
+      recentForm: { wins: 0, losses: 0, otLosses: 0 },
+    },
+    startTime: new Date(game.startTime),
+    venue: game.venue,
+    status: game.status,
+  }));
+}
+
+function convertBadges(games: any[]): Record<string, { home: BadgeType[]; away: BadgeType[] }> {
+  const badges: Record<string, { home: BadgeType[]; away: BadgeType[] }> = {};
+  
+  for (const game of games) {
+    const id = game.id?.toString() || Math.random().toString();
+    badges[id] = {
+      home: (game.badges?.home || []) as BadgeType[],
+      away: (game.badges?.away || []) as BadgeType[],
+    };
+  }
+  
+  return badges;
+}
+
+// Mock value alerts - will be calculated from real data
+const generateValueAlerts = (hotPlayers: any[], games: any[]) => {
+  return hotPlayers.slice(0, 3).map((player, index) => ({
+    id: `alert-${index}`,
+    playerName: player.name,
+    team: player.team,
+    marketType: "Goal Scorer",
+    currentOdds: player.currentOdds || 2.0 + Math.random(),
+    reason: player.ppGoals > 0 
+      ? `${player.ppGoals} buts en PP récemment` 
+      : `${player.goals} buts en 5 matchs`,
+    confidence: (player.goals >= 3 ? 'high' : player.goals >= 2 ? 'medium' : 'low') as 'high' | 'medium' | 'low',
+    matchTime: new Date(Date.now() + (index + 1) * 2 * 60 * 60 * 1000),
+  }));
+};
+
+const Index = () => {
+  const { toast } = useToast();
+  const { 
+    games, 
+    hotPlayers, 
+    stats, 
+    lastSync, 
+    isLoading, 
+    isRefreshing, 
+    refresh 
+  } = useNHLData();
+
+  const [localMatches, setLocalMatches] = useState<Match[]>([]);
+  const [localBadges, setLocalBadges] = useState<Record<string, { home: BadgeType[]; away: BadgeType[] }>>({});
+  const [valueAlerts, setValueAlerts] = useState<any[]>([]);
+
+  // Update local state when data changes
+  useEffect(() => {
+    if (games.length > 0) {
+      setLocalMatches(convertGamesToMatches(games));
+      setLocalBadges(convertBadges(games));
+    }
+  }, [games]);
+
+  useEffect(() => {
+    if (hotPlayers.length > 0) {
+      setValueAlerts(generateValueAlerts(hotPlayers, games));
+    }
+  }, [hotPlayers, games]);
+
+  const handleRefresh = async () => {
+    try {
+      await refresh();
+      toast({
+        title: "Données synchronisées",
+        description: "Les stats NHL et cotes ont été mises à jour.",
+      });
+    } catch {
+      toast({
+        title: "Erreur de synchronisation",
+        description: "Impossible de récupérer les dernières données.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Format hot players for component
+  const formattedHotPlayers = hotPlayers.map(p => ({
+    name: p.name,
+    team: p.team,
+    goalsLast5: p.goals,
+    pointsLast5: p.goals + (p.goals * 0.5), // Simplified - would need real assist data
+    ppGoals: p.ppGoals,
+    currentOdds: p.currentOdds,
+    duoPartner: p.duo?.split('+')[1],
+  }));
+
+  // Format prediction stats
+  const predictionStats: PredictionStats = {
+    totalPredictions: stats.totalPredictions,
+    wins: stats.wins,
+    losses: stats.losses,
+    winRate: stats.winRate,
+    roi: stats.roi,
+  };
+
+  // Use mock data if no real data
+  const displayMatches = localMatches.length > 0 ? localMatches : mockMatches;
+  const displayBadges = Object.keys(localBadges).length > 0 ? localBadges : mockMatchBadges;
+  const displayHotPlayers = formattedHotPlayers.length > 0 ? formattedHotPlayers : mockHotPlayers;
+  const displayStats = stats.totalPredictions > 0 ? predictionStats : mockPredictionStats;
+  const displayAlerts = valueAlerts.length > 0 ? valueAlerts : mockValueAlerts;
+
+  return (
+    <div className="min-h-screen bg-background">
+      {/* Background effects */}
+      <div className="fixed inset-0 bg-grid-pattern bg-grid opacity-30 pointer-events-none" />
+      <div className="fixed top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-gradient-radial from-primary/5 to-transparent blur-3xl pointer-events-none" />
+      
+      <Header 
+        lastSync={lastSync || new Date()} 
+        onRefresh={handleRefresh} 
+        isLoading={isLoading || isRefreshing} 
+      />
+      
+      <main className="container mx-auto px-4 py-6">
+        {/* Loading state */}
+        {isLoading && (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="w-8 h-8 animate-spin text-primary" />
+            <span className="ml-3 text-muted-foreground">Chargement des données...</span>
+          </div>
+        )}
+
+        {!isLoading && (
+          <>
+            {/* Stats Overview */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              <StatsCard
+                title="Matchs ce soir"
+                value={displayMatches.length}
+                icon={Target}
+                variant="info"
+              />
+              <StatsCard
+                title="Alertes Actives"
+                value={displayAlerts.length}
+                icon={Zap}
+                variant="warning"
+              />
+              <StatsCard
+                title="Win Rate"
+                value={`${Math.round(displayStats.winRate * 100)}%`}
+                icon={TrendingUp}
+                trend={{ value: 5.2, isPositive: true }}
+                variant="success"
+              />
+              <StatsCard
+                title="Joueurs Suivis"
+                value={displayHotPlayers.length}
+                icon={Users}
+              />
+            </div>
+
+            {/* Main Grid */}
+            <div className="grid lg:grid-cols-3 gap-6">
+              {/* Left Column - Matches */}
+              <div className="lg:col-span-2 space-y-6">
+                <UpcomingMatches matches={displayMatches} matchBadges={displayBadges} />
+                
+                {/* Value Alerts */}
+                <ValueAlerts alerts={displayAlerts} />
+              </div>
+
+              {/* Right Column - Stats & Learning */}
+              <div className="space-y-6">
+                <HotPlayers players={displayHotPlayers} />
+                <LearningPanel stats={displayStats} />
+              </div>
+            </div>
+
+            {/* Footer */}
+            <footer className="mt-12 py-6 border-t border-border">
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
+                <div className="flex items-center gap-2">
+                  <span>NHL Smart Predictor Pro</span>
+                  <span className="text-primary">•</span>
+                  <span>Powered by Lovable Cloud</span>
+                </div>
+                <div className="flex items-center gap-4">
+                  <span>Données: NHL API • Winamax</span>
+                  <span>Timezone: Paris (CET)</span>
+                </div>
+              </div>
+            </footer>
+          </>
+        )}
+      </main>
+    </div>
+  );
+};
+
+// Mock data fallback
 const mockMatches: Match[] = [
   {
     id: "1",
@@ -67,32 +285,12 @@ const mockMatches: Match[] = [
     startTime: new Date(Date.now() + 4 * 60 * 60 * 1000),
     status: "scheduled",
   },
-  {
-    id: "4",
-    homeTeam: {
-      abbr: "EDM",
-      name: "Oilers",
-      isBackToBack: true,
-      pimPerGame: 7.8,
-      recentForm: { wins: 2, losses: 3, otLosses: 0 },
-    },
-    awayTeam: {
-      abbr: "LAK",
-      name: "Kings",
-      isBackToBack: false,
-      pimPerGame: 6.5,
-      recentForm: { wins: 3, losses: 1, otLosses: 1 },
-    },
-    startTime: new Date(Date.now() + 7 * 60 * 60 * 1000),
-    status: "scheduled",
-  },
 ];
 
 const mockMatchBadges: Record<string, { home: BadgeType[]; away: BadgeType[] }> = {
   "1": { home: ["fire"], away: ["btb", "discipline"] },
   "2": { home: [], away: ["fire"] },
   "3": { home: ["fire"], away: ["pp"] },
-  "4": { home: ["btb"], away: [] },
 };
 
 const mockPredictionStats: PredictionStats = {
@@ -143,87 +341,5 @@ const mockValueAlerts = [
     matchTime: new Date(Date.now() + 5 * 60 * 60 * 1000),
   },
 ];
-
-const Index = () => {
-  const [isLoading, setIsLoading] = useState(false);
-  const [lastSync] = useState(new Date());
-
-  const handleRefresh = () => {
-    setIsLoading(true);
-    setTimeout(() => setIsLoading(false), 1500);
-  };
-
-  return (
-    <div className="min-h-screen bg-background">
-      {/* Background effects */}
-      <div className="fixed inset-0 bg-grid-pattern bg-grid opacity-30 pointer-events-none" />
-      <div className="fixed top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-gradient-radial from-primary/5 to-transparent blur-3xl pointer-events-none" />
-      
-      <Header lastSync={lastSync} onRefresh={handleRefresh} isLoading={isLoading} />
-      
-      <main className="container mx-auto px-4 py-6">
-        {/* Stats Overview */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <StatsCard
-            title="Matchs ce soir"
-            value={mockMatches.length}
-            icon={Target}
-            variant="info"
-          />
-          <StatsCard
-            title="Alertes Actives"
-            value={mockValueAlerts.length}
-            icon={Zap}
-            variant="warning"
-          />
-          <StatsCard
-            title="Win Rate"
-            value={`${Math.round(mockPredictionStats.winRate * 100)}%`}
-            icon={TrendingUp}
-            trend={{ value: 5.2, isPositive: true }}
-            variant="success"
-          />
-          <StatsCard
-            title="Joueurs Suivis"
-            value={mockHotPlayers.length}
-            icon={Users}
-          />
-        </div>
-
-        {/* Main Grid */}
-        <div className="grid lg:grid-cols-3 gap-6">
-          {/* Left Column - Matches */}
-          <div className="lg:col-span-2 space-y-6">
-            <UpcomingMatches matches={mockMatches} matchBadges={mockMatchBadges} />
-            
-            {/* Value Alerts */}
-            <ValueAlerts alerts={mockValueAlerts} />
-          </div>
-
-          {/* Right Column - Stats & Learning */}
-          <div className="space-y-6">
-            <HotPlayers players={mockHotPlayers} />
-            <LearningPanel stats={mockPredictionStats} />
-          </div>
-        </div>
-
-        {/* Footer */}
-        <footer className="mt-12 py-6 border-t border-border">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
-            <div className="flex items-center gap-2">
-              <span>NHL Smart Predictor Pro</span>
-              <span className="text-primary">•</span>
-              <span>Powered by Lovable Cloud</span>
-            </div>
-            <div className="flex items-center gap-4">
-              <span>Données: NHL API • Winamax</span>
-              <span>Timezone: Paris (CET)</span>
-            </div>
-          </div>
-        </footer>
-      </main>
-    </div>
-  );
-};
 
 export default Index;
