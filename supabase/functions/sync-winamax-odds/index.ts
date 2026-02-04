@@ -22,133 +22,110 @@ serve(async (req) => {
     }
 
     const supabase = createClient(supabaseUrl, supabaseKey);
-    console.log('Starting Winamax odds sync...');
+    console.log('Starting Winamax FR odds sync...');
 
     const baseUrl = 'https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds';
     const oddsToInsert: any[] = [];
 
-    // ============ PART 1: Fetch H2H odds from FR region (Winamax) ============
+    let h2hCount = 0;
+    let goalScorerCount = 0;
+    let playerPointsCount = 0;
+
+    // Helper function to process outcomes from Winamax
+    const processWinamaxOdds = (game: any, marketKey: string) => {
+      const commenceTime = new Date(game.commence_time);
+      const matchName = `${game.away_team} @ ${game.home_team}`;
+      
+      const winamax = game.bookmakers?.find((b: any) => b.key === 'winamax_fr');
+      if (!winamax) return 0;
+
+      let count = 0;
+      for (const marketData of winamax.markets || []) {
+        if (marketData.key !== marketKey) continue;
+
+        for (const outcome of marketData.outcomes || []) {
+          let selection = outcome.name;
+          // For player markets, the player name is in "description"
+          if (marketKey.startsWith('player_')) {
+            selection = outcome.description || outcome.name;
+          }
+          // Skip generic Yes/No without player name
+          if ((selection === 'Yes' || selection === 'No') && !outcome.description) continue;
+
+          oddsToInsert.push({
+            commence_time: commenceTime.toISOString(),
+            match_name: matchName,
+            selection: selection,
+            price: outcome.price,
+            market_type: marketKey,
+            fetched_at: new Date().toISOString(),
+          });
+          count++;
+        }
+      }
+      return count;
+    };
+
+    // ============ PART 1: Fetch H2H odds from FR (always available) ============
     try {
-      const frUrl = `${baseUrl}?apiKey=${oddsApiKey}&regions=fr&markets=h2h`;
-      console.log('Fetching H2H odds from FR region (Winamax)...');
+      const h2hUrl = `${baseUrl}?apiKey=${oddsApiKey}&regions=fr&markets=h2h&oddsFormat=decimal`;
+      console.log('Fetching H2H odds from Winamax FR...');
       
-      const frResponse = await fetch(frUrl);
-      
-      if (frResponse.ok) {
-        const frData = await frResponse.json();
-        console.log(`Received ${frData.length} games for H2H (FR)`);
-
-        for (const game of frData) {
-          const commenceTime = new Date(game.commence_time);
-          const matchName = `${game.away_team} @ ${game.home_team}`;
-          
-          // Log des bookmakers disponibles pour debug
-          const bookmakerKeys = game.bookmakers?.map((b: any) => b.key) || [];
-          console.log(`Match: ${matchName} - FR Bookmakers: ${bookmakerKeys.join(', ')}`);
-
-          // Chercher Winamax FR avec la bonne clé
-          const winamax = game.bookmakers?.find((b: any) => b.key === 'winamax_fr');
-
-          if (!winamax) {
-            console.log(`No Winamax for ${matchName}`);
-            continue;
-          }
-
-          for (const marketData of winamax.markets || []) {
-            for (const outcome of marketData.outcomes || []) {
-              oddsToInsert.push({
-                commence_time: commenceTime.toISOString(),
-                match_name: matchName,
-                selection: outcome.name,
-                price: outcome.price,
-                market_type: 'h2h',
-                fetched_at: new Date().toISOString(),
-              });
-            }
-          }
+      const response = await fetch(h2hUrl);
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`H2H: Received ${data.length} games`);
+        for (const game of data) {
+          h2hCount += processWinamaxOdds(game, 'h2h');
         }
       } else {
-        console.error(`Failed to fetch FR H2H odds: ${frResponse.status}`);
+        console.error(`H2H fetch failed: ${response.status}`);
       }
     } catch (error) {
-      console.error('Error fetching FR H2H odds:', error);
+      console.error('Error fetching H2H:', error);
     }
 
-    // ============ PART 2: Fetch Goal Scorer odds from US region ============
+    // ============ PART 2: Try to fetch player_goal_scorer_anytime from FR ============
     try {
-      // The correct market key is "player_goal_scorer_anytime" (not "player_anytime_goal_scorer")
-      const usUrl = `${baseUrl}?apiKey=${oddsApiKey}&regions=us&markets=player_goal_scorer_anytime`;
-      console.log('Fetching Goal Scorer odds from US region (DraftKings/FanDuel)...');
+      const scorerUrl = `${baseUrl}?apiKey=${oddsApiKey}&regions=fr&markets=player_goal_scorer_anytime&oddsFormat=decimal`;
+      console.log('Trying player_goal_scorer_anytime from Winamax FR...');
       
-      const usResponse = await fetch(usUrl);
-      
-      if (usResponse.ok) {
-        const usData = await usResponse.json();
-        console.log(`Received ${usData.length} games for Goal Scorer (US)`);
-
-        let goalScorerOddsCount = 0;
-        for (const game of usData) {
-          const commenceTime = new Date(game.commence_time);
-          const matchName = `${game.away_team} @ ${game.home_team}`;
-          
-          // Look for DraftKings, FanDuel, or BetMGM (they have player props)
-          const usBookmaker = game.bookmakers?.find((b: any) => 
-            ['draftkings', 'fanduel', 'betmgm', 'pointsbetus', 'betrivers'].includes(b.key)
-          );
-
-          if (!usBookmaker) {
-            continue;
-          }
-
-          console.log(`Using ${usBookmaker.key} for ${matchName} goal scorer odds`);
-
-          // Find the anytime goal scorer market
-          const goalScorerMarket = usBookmaker.markets?.find((m: any) => 
-            m.key === 'player_goal_scorer_anytime'
-          );
-
-          if (!goalScorerMarket) continue;
-
-          for (const outcome of goalScorerMarket.outcomes || []) {
-            // In the API response: outcome.description is the player name, outcome.name is "Yes"
-            const playerName = outcome.description || outcome.name;
-            
-            // Convert American odds to decimal if needed
-            let decimalPrice = outcome.price;
-            if (typeof decimalPrice === 'number') {
-              // Check if it's American odds (typically > 100 or < -100)
-              if (decimalPrice >= 100) {
-                decimalPrice = (decimalPrice / 100) + 1;
-              } else if (decimalPrice <= -100) {
-                decimalPrice = (100 / Math.abs(decimalPrice)) + 1;
-              }
-            }
-            
-            oddsToInsert.push({
-              commence_time: commenceTime.toISOString(),
-              match_name: matchName,
-              selection: playerName,
-              price: parseFloat(decimalPrice.toFixed(2)),
-              market_type: 'player_goal_scorer_anytime',
-              fetched_at: new Date().toISOString(),
-            });
-            goalScorerOddsCount++;
-          }
+      const response = await fetch(scorerUrl);
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`Goal Scorer FR: Received ${data.length} games`);
+        for (const game of data) {
+          goalScorerCount += processWinamaxOdds(game, 'player_goal_scorer_anytime');
         }
-        console.log(`Collected ${goalScorerOddsCount} goal scorer odds from US bookmakers`);
       } else {
-        const errorText = await usResponse.text();
-        console.error(`Failed to fetch US Goal Scorer odds: ${usResponse.status} - ${errorText}`);
+        console.log(`Goal Scorer FR not available (${response.status}), skipping`);
       }
     } catch (error) {
-      console.error('Error fetching US Goal Scorer odds:', error);
+      console.log('Goal Scorer FR not available:', error);
     }
 
-    // ============ PART 3: Insert all collected odds ============
-    const h2hCount = oddsToInsert.filter(o => o.market_type === 'h2h').length;
-    const goalScorerCount = oddsToInsert.filter(o => o.market_type === 'player_goal_scorer_anytime').length;
-    console.log(`Total odds collected: ${oddsToInsert.length} (H2H: ${h2hCount}, Goal Scorer: ${goalScorerCount})`);
+    // ============ PART 3: Try to fetch player_points from FR ============
+    try {
+      const pointsUrl = `${baseUrl}?apiKey=${oddsApiKey}&regions=fr&markets=player_points&oddsFormat=decimal`;
+      console.log('Trying player_points from Winamax FR...');
+      
+      const response = await fetch(pointsUrl);
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`Player Points FR: Received ${data.length} games`);
+        for (const game of data) {
+          playerPointsCount += processWinamaxOdds(game, 'player_points');
+        }
+      } else {
+        console.log(`Player Points FR not available (${response.status}), skipping`);
+      }
+    } catch (error) {
+      console.log('Player Points FR not available:', error);
+    }
 
+    console.log(`Total collected: H2H=${h2hCount}, Buteurs=${goalScorerCount}, Points=${playerPointsCount}`);
+
+    // ============ Insert all collected odds ============
     if (oddsToInsert.length > 0) {
       const matchNames = [...new Set(oddsToInsert.map(o => o.match_name))];
       
@@ -167,7 +144,7 @@ serve(async (req) => {
         throw insertError;
       }
 
-      console.log(`Inserted ${oddsToInsert.length} odds records (H2H + Goal Scorer)`);
+      console.log(`Inserted ${oddsToInsert.length} Winamax FR odds`);
     }
 
     await supabase
@@ -181,7 +158,9 @@ serve(async (req) => {
         oddsRecorded: oddsToInsert.length,
         h2hOdds: h2hCount,
         goalScorerOdds: goalScorerCount,
+        playerPointsOdds: playerPointsCount,
         matchesProcessed: [...new Set(oddsToInsert.map(o => o.match_name))].length,
+        note: goalScorerCount === 0 ? 'Cotes buteurs non disponibles sur Winamax FR pour la NHL' : undefined,
       }),
       { 
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
