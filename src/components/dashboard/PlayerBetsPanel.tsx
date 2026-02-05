@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { supabase } from "@/integrations/supabase/client";
-import { Brain, RefreshCw, Trophy, Flame, Zap, Shield, Sparkles } from "lucide-react";
+import { Brain, RefreshCw, Trophy, Flame, Zap, Shield, Sparkles, Target, DollarSign } from "lucide-react";
 import { toast } from "sonner";
 import { useBankroll } from "@/hooks/useBankroll";
 
@@ -23,11 +23,11 @@ interface PlayerSuggestion {
 }
 
 export function PlayerBetsPanel() {
-  const { addBet } = useBankroll();
+  const { addBet, isUpdating } = useBankroll();
   const [players, setPlayers] = useState<PlayerSuggestion[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [megaOdds, setMegaOdds] = useState<string>("");
-  const [isPlacing, setIsPlacing] = useState(false);
+  const [isPlacing, setIsPlacing] = useState<string | null>(null);
 
   const fetchPlayerSuggestions = async () => {
     setIsLoading(true);
@@ -44,10 +44,13 @@ export function PlayerBetsPanel() {
         .order("commence_time", { ascending: true })
         .limit(40);
 
-      const tonightTeams = new Map<string, { match: string; time: string }>();
+      const tonightTeams = new Map<string, { match: string; time: string; opponent: string }>();
       tonightOdds?.forEach((o) => {
         const teams = extractTeamsFromMatch(o.match_name);
-        teams.forEach((t) => tonightTeams.set(t, { match: `${teams[0]} @ ${teams[1]}`, time: o.commence_time }));
+        if (teams.length === 2) {
+          tonightTeams.set(teams[0], { match: `${teams[0]} @ ${teams[1]}`, time: o.commence_time, opponent: teams[1] });
+          tonightTeams.set(teams[1], { match: `${teams[0]} @ ${teams[1]}`, time: o.commence_time, opponent: teams[0] });
+        }
       });
 
       const fourteenDaysAgo = new Date();
@@ -57,20 +60,26 @@ export function PlayerBetsPanel() {
         .select("*")
         .gte("game_date", fourteenDaysAgo.toISOString().split("T")[0]);
 
-      // Fusion des noms (Cole Caufield / C. Caufield)
+      // --- DÉDOUBLONNAGE ET NORMALISATION DES NOMS ---
       const statsByName = new Map<string, { goals: number; team: string }>();
+
       recentGoals?.forEach((g) => {
         if (!tonightTeams.has(g.team_abbr)) return;
+
+        // On normalise : on cherche si une version longue du nom existe déjà
         let key = g.scorer;
-        if (key.match(/^[A-Z]\.\s/)) {
+        const isShortName = key.match(/^[A-Z]\.\s/);
+
+        if (isShortName) {
           const lastName = key.split(". ")[1];
           for (const existingName of statsByName.keys()) {
             if (existingName.endsWith(lastName) && !existingName.match(/^[A-Z]\.\s/)) {
-              key = existingName;
+              key = existingName; // On fusionne vers le nom complet
               break;
             }
           }
         }
+
         const existing = statsByName.get(key) || { goals: 0, team: g.team_abbr };
         existing.goals++;
         statsByName.set(key, existing);
@@ -96,9 +105,17 @@ export function PlayerBetsPanel() {
         });
       });
 
-      setPlayers(suggestions.sort((a, b) => b.confidence - a.confidence));
+      const sorted = suggestions.sort((a, b) => b.confidence - a.confidence);
+      sorted.forEach((p, i) => {
+        if (i < 3) p.category = "SAFE";
+        else if (i < 8) p.category = "FUN";
+        else p.category = "MEGA_FUN";
+      });
+
+      setPlayers(sorted);
+      toast.success("IA : Scouting terminé");
     } catch (err) {
-      toast.error("Erreur d'analyse");
+      toast.error("Erreur de synchronisation");
     } finally {
       setIsLoading(false);
     }
@@ -108,45 +125,37 @@ export function PlayerBetsPanel() {
     fetchPlayerSuggestions();
   }, []);
 
-  // LOGIQUE MEGA FUN : 1 Buteur + 2 Points par match (sur 4 matchs max)
+  // --- LOGIQUE MEGA FUN : 4 MATCHS DIFFÉRENTS, MAX 2 JOUEURS PAR MATCH ---
   const megaFunSelection = useMemo(() => {
     const selected: PlayerSuggestion[] = [];
-    const matchGroups = new Map<string, PlayerSuggestion[]>();
+    const matchCounts = new Map<string, number>();
+    const uniqueMatchIds = new Set<string>();
 
-    // Grouper les joueurs par match
-    players.forEach((p) => {
-      const group = matchGroups.get(p.match) || [];
-      group.push(p);
-      matchGroups.set(p.match, group);
-    });
+    for (const p of players) {
+      const currentMatchCount = matchCounts.get(p.match) || 0;
 
-    // Pour chaque match, construire le trio (1 Buteur + 2 Points)
-    for (const [match, group] of matchGroups) {
-      if (selected.length >= 9) break; // Limite raisonnable de joueurs au total
-
-      const scorer = group.find((p) => p.suggestedType === "Buteur");
-      const points = group.filter((p) => p !== scorer).slice(0, 2);
-
-      if (scorer) {
-        selected.push({ ...scorer, suggestedType: "Buteur" });
-        points.forEach((p) => selected.push({ ...p, suggestedType: "Point" }));
-      } else {
-        // Si pas de buteur net, on prend juste les 2 meilleurs en "Point"
-        group.slice(0, 2).forEach((p) => selected.push({ ...p, suggestedType: "Point" }));
+      // On accepte le joueur si on n'a pas encore atteint le quota de matchs ou si on complète un match existant
+      if (uniqueMatchIds.size < 4 || uniqueMatchIds.has(p.match)) {
+        if (currentMatchCount < 2) {
+          selected.push(p);
+          matchCounts.set(p.match, currentMatchCount + 1);
+          uniqueMatchIds.add(p.match);
+        }
       }
+      if (selected.length >= 6 && uniqueMatchIds.size >= 4) break;
     }
     return selected;
   }, [players]);
 
   const handlePlaceMegaFun = async () => {
-    if (!megaOdds) return toast.error("Cote manquante");
-    setIsPlacing(true);
+    if (!megaOdds) return toast.error("Saisissez la cote");
+    setIsPlacing("mega");
     try {
       addBet({
         bet_date: new Date().toISOString().split("T")[0],
-        match_name: "MEGA FUN CORRÉLÉ (1 BUT + 2 PTS)",
+        match_name: "COMBO IA MEGA FUN",
         bet_type: "MEGA_FUN",
-        selection: megaFunSelection.map((p) => `${p.name} [${p.team}] (${p.suggestedType})`).join(" + "),
+        selection: megaFunSelection.map((p) => `${p.name} (${p.suggestedType})`).join(" + "),
         odds: parseFloat(megaOdds),
         stake: 10,
         potential_gain: parseFloat(megaOdds) * 10,
@@ -154,9 +163,9 @@ export function PlayerBetsPanel() {
         actual_gain: 0,
         source: "ai_mega_fun",
       });
-      toast.success("Combiné corrélé enregistré !");
+      toast.success("Mega Fun enregistré !");
     } finally {
-      setIsPlacing(false);
+      setIsPlacing(null);
     }
   };
 
@@ -165,7 +174,7 @@ export function PlayerBetsPanel() {
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-2">
           <Brain className="w-5 h-5 text-primary" />
-          <h3 className="font-bold uppercase text-sm">Agent IA : Scénarios de Match</h3>
+          <h3 className="font-bold uppercase text-sm">Agent IA : Scouting Joueurs</h3>
         </div>
         <Button onClick={fetchPlayerSuggestions} size="sm" variant="ghost" disabled={isLoading}>
           <RefreshCw className={isLoading ? "animate-spin" : ""} />
@@ -176,38 +185,75 @@ export function PlayerBetsPanel() {
         <Skeleton className="h-64 w-full" />
       ) : (
         <div className="space-y-6">
-          <div className="pt-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold text-green-500 uppercase flex items-center gap-1">
+                <Shield className="w-3 h-3" /> Top Safe
+              </p>
+              {players
+                .filter((p) => p.category === "SAFE")
+                .slice(0, 3)
+                .map((p) => (
+                  <div
+                    key={p.id}
+                    className="p-2 rounded border border-green-500/10 bg-green-500/5 flex justify-between items-center"
+                  >
+                    <span className="text-xs font-bold">
+                      {p.name}{" "}
+                      <Badge variant="outline" className="text-[9px] ml-1">
+                        {p.team}
+                      </Badge>
+                    </span>
+                    <Badge className="bg-green-500/20 text-green-500 text-[9px]">{p.confidence}%</Badge>
+                  </div>
+                ))}
+            </div>
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold text-orange-500 uppercase flex items-center gap-1">
+                <Zap className="w-3 h-3" /> Top Fun
+              </p>
+              {players
+                .filter((p) => p.category === "FUN")
+                .slice(0, 3)
+                .map((p) => (
+                  <div
+                    key={p.id}
+                    className="p-2 rounded border border-orange-500/10 bg-orange-500/5 flex justify-between items-center"
+                  >
+                    <span className="text-xs font-bold">
+                      {p.name}{" "}
+                      <Badge variant="outline" className="text-[9px] ml-1">
+                        {p.team}
+                      </Badge>
+                    </span>
+                    <Badge className="bg-orange-500/20 text-orange-500 text-[9px]">{p.confidence}%</Badge>
+                  </div>
+                ))}
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-purple-500/20">
             <div className="flex items-center gap-2 mb-3">
               <Flame className="w-5 h-5 text-purple-500 animate-pulse" />
               <span className="text-xs font-black text-purple-400 uppercase italic">
-                Vibration Mega Fun : 1 Buteur + 2 Passeurs
+                Vibration Mega Fun (4 Matchs Variés)
               </span>
             </div>
 
             <div className="bg-gradient-to-br from-purple-950/40 to-black border-2 border-purple-500/30 rounded-xl p-4">
-              <div className="space-y-4 mb-4">
-                {/* On regroupe visuellement par match pour que tu vois le trio */}
-                {Array.from(new Set(megaFunSelection.map((p) => p.match))).map((matchName) => (
-                  <div key={matchName} className="border-l-2 border-purple-500/30 pl-3 space-y-1">
-                    <p className="text-[9px] text-gray-500 font-bold mb-1">{matchName}</p>
-                    {megaFunSelection
-                      .filter((p) => p.match === matchName)
-                      .map((p, i) => (
-                        <div key={i} className="flex justify-between items-center bg-white/5 p-1 px-2 rounded">
-                          <span className="text-[11px] font-bold">
-                            {p.name}{" "}
-                            <Badge variant="outline" className="text-[7px] py-0 ml-1 opacity-70">
-                              {p.team}
-                            </Badge>
-                          </span>
-                          <Badge
-                            variant="outline"
-                            className={`text-[9px] ${p.suggestedType === "Buteur" ? "border-orange-500 text-orange-500" : "border-purple-500 text-purple-300"}`}
-                          >
-                            {p.suggestedType}
-                          </Badge>
-                        </div>
-                      ))}
+              <div className="space-y-2 mb-4">
+                {megaFunSelection.map((p, i) => (
+                  <div
+                    key={i}
+                    className="flex justify-between items-center bg-white/5 p-2 rounded border border-white/5 hover:bg-white/10 transition-colors"
+                  >
+                    <div className="flex flex-col">
+                      <span className="text-[11px] font-bold">{p.name}</span>
+                      <span className="text-[8px] text-gray-500 uppercase font-mono">{p.match}</span>
+                    </div>
+                    <Badge variant="outline" className="text-[9px] border-purple-500/50 text-purple-300">
+                      {p.suggestedType}
+                    </Badge>
                   </div>
                 ))}
               </div>
@@ -216,7 +262,7 @@ export function PlayerBetsPanel() {
                 <div className="relative flex-1">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-purple-500 font-bold">@</span>
                   <Input
-                    placeholder="Cote Totale"
+                    placeholder="Cote Finale Bookmaker"
                     type="number"
                     value={megaOdds}
                     onChange={(e) => setMegaOdds(e.target.value)}
@@ -225,10 +271,10 @@ export function PlayerBetsPanel() {
                 </div>
                 <Button
                   onClick={handlePlaceMegaFun}
-                  disabled={isPlacing || !megaOdds}
+                  disabled={isPlacing === "mega" || !megaOdds}
                   className="bg-purple-600 hover:bg-purple-500"
                 >
-                  {isPlacing ? <RefreshCw className="animate-spin" /> : <Trophy className="w-4 h-4" />}
+                  {isPlacing === "mega" ? <RefreshCw className="animate-spin" /> : <Trophy className="w-4 h-4" />}
                 </Button>
               </div>
             </div>
@@ -278,6 +324,7 @@ function extractTeamsFromMatch(matchName: string): string[] {
     oilers: "EDM",
     utah: "UTA",
   };
+
   const parts = matchName.split(/\s+(?:vs|@|at)\s+/i);
   const teams: string[] = [];
   parts.forEach((part) => {
